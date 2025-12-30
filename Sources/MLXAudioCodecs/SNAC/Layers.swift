@@ -10,13 +10,33 @@ import MLX
 import MLXNN
 import MLXRandom
 
+// MARK: - Sequential (matches Python nn.Sequential serialization)
+
+/// A Sequential container that wraps modules in a `layers` array
+/// to match Python's nn.Sequential weight serialization format.
+public class Sequential: Module, UnaryLayer {
+    let layers: [Module]
+
+    public init(_ layers: [Module]) {
+        self.layers = layers
+    }
+
+    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+        var result = x
+        for layer in layers {
+            result = (layer as! UnaryLayer).callAsFunction(result)
+        }
+        return result
+    }
+}
+
 // MARK: - Helper Functions
 
 func normalizeWeight(_ x: MLXArray, exceptDim: Int = 0) -> MLXArray {
     guard x.ndim == 3 else {
         fatalError("Input tensor must have 3 dimensions")
     }
-    
+
     let axes = (0..<x.ndim).filter { $0 != exceptDim }
     return sqrt(sum(pow(x, MLXArray(2)), axes: axes, keepDims: true))
 }
@@ -31,17 +51,17 @@ func snake(_ x: MLXArray, alpha: MLXArray) -> MLXArray {
 
 // MARK: - Weight Normalized Conv1d
 
-class WNConv1d: Module {
-    var weightG: MLXArray
-    var weightV: MLXArray
+class WNConv1d: Module, UnaryLayer {
+    @ModuleInfo(key: "weight_g") var weightG: MLXArray
+    @ModuleInfo(key: "weight_v") var weightV: MLXArray
     var bias: MLXArray?
-    
+
     let kernelSize: Int
     let stride: Int
     let padding: Int
     let dilation: Int
     let groups: Int
-    
+
     init(
         inChannels: Int,
         outChannels: Int,
@@ -57,23 +77,18 @@ class WNConv1d: Module {
         self.padding = padding
         self.dilation = dilation
         self.groups = groups
-        
-        self.weightG = MLXArray([])
-        self.weightV = MLXArray([])
-        self.bias = bias ? MLX.zeros([outChannels]) : nil
-        
-        super.init()
-        
+
         let scale = sqrt(1.0 / Double(inChannels * kernelSize))
         let weightInit = MLXRandom.uniform(
             low: -scale,
             high: scale,
             [outChannels, kernelSize, inChannels / groups]
         )
-        self.weightG = normalizeWeight(weightInit)
-        self.weightV = weightInit / (self.weightG + 1e-12)
+        self._weightG.wrappedValue = normalizeWeight(weightInit)
+        self._weightV.wrappedValue = weightInit / (self._weightG.wrappedValue + 1e-12)
+        self.bias = bias ? MLX.zeros([outChannels]) : nil
     }
-    
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         // Ensure input is 3D: [batch, in_channels, time]
         let x3d: MLXArray
@@ -105,16 +120,16 @@ class WNConv1d: Module {
 // MARK: - Weight Normalized ConvTranspose1d
 
 public class WNConvTranspose1d: Module, UnaryLayer {
-    let bias: MLXArray?
+    var bias: MLXArray?
     let kernelSize: Int
     let padding: Int
     let dilation: Int
     let stride: Int
     let outputPadding: Int
     let groups: Int
-    var weightG: MLXArray
-    var weightV: MLXArray
-    
+    @ModuleInfo(key: "weight_g") var weightG: MLXArray
+    @ModuleInfo(key: "weight_v") var weightV: MLXArray
+
     public init(
         inChannels: Int,
         outChannels: Int,
@@ -133,23 +148,26 @@ public class WNConvTranspose1d: Module, UnaryLayer {
         self.stride = stride
         self.outputPadding = outputPadding
         self.groups = groups
-        
+
         let scale = sqrt(1.0 / Float(inChannels * kernelSize))
         let weightInit = MLXRandom.uniform(
             low: -scale,
             high: scale,
             [inChannels, kernelSize, outChannels / groups]
         )
-        self.weightG = normalizeWeight(weightInit, exceptDim: 0)
-        self.weightV = weightInit / (self.weightG + 1e-12)
+        self._weightG.wrappedValue = normalizeWeight(weightInit, exceptDim: 0)
+        self._weightV.wrappedValue = weightInit / (self._weightG.wrappedValue + 1e-12)
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
+        // Input is NCT [batch, channels, time], transpose to NTC for convTransposed1d
+        let xT = x.transposed(axes: [0, 2, 1])  // NCT -> NTC
+
         let weight = weightG * weightV / normalizeWeight(weightV, exceptDim: 0)
         // MLX uses (out_channels, kernel_size, in_channels) format
         let weightSwapped = weight.swappedAxes(0, 2)
         var y = MLX.convTransposed1d(
-            x,
+            xT,
             weightSwapped,
             stride: stride,
             padding: padding,
@@ -159,7 +177,8 @@ public class WNConvTranspose1d: Module, UnaryLayer {
         if let bias = bias {
             y = y + bias
         }
-        return y
+        // Output is NTC, transpose back to NCT
+        return y.transposed(axes: [0, 2, 1])
     }
 }
 
@@ -168,24 +187,24 @@ public class WNConvTranspose1d: Module, UnaryLayer {
 
 public class Snake1d: Module, UnaryLayer {
     var alpha: MLXArray
-    
+
     public init(channels: Int) {
         self.alpha = ones([1, channels, 1])
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        return snake(x, alpha: alpha.swappedAxes(1, 2))
+        return snake(x, alpha: alpha)
     }
 }
 
 // MARK: - Residual Unit
 
 public class ResidualUnit: Module, UnaryLayer {
-    let block: [Module]
-    
+    let block: Sequential
+
     public init(dim: Int = 16, dilation: Int = 1, kernel: Int = 7, groups: Int = 1) {
         let pad = ((kernel - 1) * dilation) / 2
-        self.block = [
+        self.block = Sequential([
             Snake1d(channels: dim),
             WNConv1d(
                 inChannels: dim,
@@ -197,15 +216,12 @@ public class ResidualUnit: Module, UnaryLayer {
             ),
             Snake1d(channels: dim),
             WNConv1d(inChannels: dim, outChannels: dim, kernelSize: 1)
-        ]
+        ])
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var y = x
-        for layer in block {
-            y = (layer as! UnaryLayer).callAsFunction(y)
-        }
-        
+        let y = block(x)
+
         let pad = (x.shape[x.ndim - 1] - y.shape[y.ndim - 1]) / 2
         var xPadded = x
         if pad > 0 {
@@ -218,11 +234,11 @@ public class ResidualUnit: Module, UnaryLayer {
 // MARK: - Encoder Block
 
 public class EncoderBlock: Module, UnaryLayer {
-    let block: [Module]
-    
+    let block: Sequential
+
     public init(outputDim: Int = 16, inputDim: Int? = nil, stride: Int = 1, groups: Int = 1) {
         let inputDim = inputDim ?? outputDim / 2
-        self.block = [
+        self.block = Sequential([
             ResidualUnit(dim: inputDim, dilation: 1, groups: groups),
             ResidualUnit(dim: inputDim, dilation: 3, groups: groups),
             ResidualUnit(dim: inputDim, dilation: 9, groups: groups),
@@ -234,15 +250,11 @@ public class EncoderBlock: Module, UnaryLayer {
                 stride: stride,
                 padding: Int(ceil(Double(stride) / 2.0))
             )
-        ]
+        ])
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var result = x
-        for layer in block {
-            result = (layer as! UnaryLayer).callAsFunction(result)
-        }
-        return result
+        return block(x)
     }
 }
 
@@ -250,16 +262,16 @@ public class EncoderBlock: Module, UnaryLayer {
 
 public class NoiseBlock: Module, UnaryLayer {
     let linear: WNConv1d
-    
+
     public init(dim: Int) {
         self.linear = WNConv1d(inChannels: dim, outChannels: dim, kernelSize: 1, bias: false)
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
         let B = x.shape[0]
         let C = x.shape[1]
         let T = x.shape[2]
-        
+
         let noise = MLXRandom.normal([B, 1, T])
         let h = linear(x)
         let n = noise * h
@@ -270,8 +282,8 @@ public class NoiseBlock: Module, UnaryLayer {
 // MARK: - Decoder Block
 
 public class DecoderBlock: Module, UnaryLayer {
-    let block: [Module]
-    
+    let block: Sequential
+
     public init(inputDim: Int = 16, outputDim: Int = 8, stride: Int = 1, noise: Bool = false, groups: Int = 1) {
         var layers: [Module] = [
             Snake1d(channels: inputDim),
@@ -284,34 +296,30 @@ public class DecoderBlock: Module, UnaryLayer {
                 outputPadding: stride % 2
             )
         ]
-        
+
         if noise {
             layers.append(NoiseBlock(dim: outputDim))
         }
-        
+
         layers.append(contentsOf: [
             ResidualUnit(dim: outputDim, dilation: 1, groups: groups),
             ResidualUnit(dim: outputDim, dilation: 3, groups: groups),
             ResidualUnit(dim: outputDim, dilation: 9, groups: groups)
         ])
-        
-        self.block = layers
+
+        self.block = Sequential(layers)
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var result = x
-        for layer in block {
-            result = (layer as! UnaryLayer).callAsFunction(result)
-        }
-        return result
+        return block(x)
     }
 }
 
 // MARK: - Encoder
 
 public class Encoder: Module, UnaryLayer {
-    let block: [Module]
-    
+    let block: Sequential
+
     public init(
         dModel: Int = 64,
         strides: [Int] = [3, 3, 7, 7],
@@ -321,18 +329,18 @@ public class Encoder: Module, UnaryLayer {
         var layers: [Module] = [
             WNConv1d(inChannels: 1, outChannels: dModel, kernelSize: 7, padding: 3)
         ]
-        
+
         var currentDModel = dModel
         for stride in strides {
             currentDModel *= 2
             let groups = depthwise ? currentDModel / 2 : 1
             layers.append(EncoderBlock(outputDim: currentDModel, stride: stride, groups: groups))
         }
-        
+
         if let attnWindowSize = attnWindowSize {
             layers.append(LocalMHA(dim: currentDModel, windowSize: attnWindowSize))
         }
-        
+
         let groups = depthwise ? currentDModel : 1
         layers.append(
             WNConv1d(
@@ -343,24 +351,20 @@ public class Encoder: Module, UnaryLayer {
                 groups: groups
             )
         )
-        
-        self.block = layers
+
+        self.block = Sequential(layers)
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var result = x
-        for layer in block {
-            result = (layer as! UnaryLayer).callAsFunction(result)
-        }
-        return result.swappedAxes(1, 2)
+        return block(x)
     }
 }
 
 // MARK: - Decoder
 
 public class Decoder: Module, UnaryLayer {
-    let model: [Module]
-    
+    let model: Sequential
+
     public init(
         inputChannel: Int,
         channels: Int,
@@ -371,7 +375,7 @@ public class Decoder: Module, UnaryLayer {
         dOut: Int = 1
     ) {
         var layers: [Module]
-        
+
         if depthwise {
             layers = [
                 WNConv1d(
@@ -388,11 +392,11 @@ public class Decoder: Module, UnaryLayer {
                 WNConv1d(inChannels: inputChannel, outChannels: channels, kernelSize: 7, padding: 3)
             ]
         }
-        
+
         if let attnWindowSize = attnWindowSize {
             layers.append(LocalMHA(dim: channels, windowSize: attnWindowSize))
         }
-        
+
         for (i, stride) in rates.enumerated() {
             let inputDim = channels / Int(pow(2.0, Double(i)))
             let outputDim = channels / Int(pow(2.0, Double(i + 1)))
@@ -401,22 +405,18 @@ public class Decoder: Module, UnaryLayer {
                 DecoderBlock(inputDim: inputDim, outputDim: outputDim, stride: stride, noise: noise, groups: groups)
             )
         }
-        
+
         let finalOutputDim = channels / Int(pow(2.0, Double(rates.count)))
         layers.append(contentsOf: [
             Snake1d(channels: finalOutputDim),
             WNConv1d(inChannels: finalOutputDim, outChannels: dOut, kernelSize: 7, padding: 3),
             Tanh()
         ])
-        
-        self.model = layers
+
+        self.model = Sequential(layers)
     }
-    
+
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var result = x
-        for layer in model {
-            result = (layer as! UnaryLayer).callAsFunction(result)
-        }
-        return result
+        return model(x)
     }
 }

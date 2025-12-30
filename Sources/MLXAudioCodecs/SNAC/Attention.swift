@@ -11,21 +11,21 @@ import MLXNN
 
 // MARK: - Local Multi-Head Attention
 
-public class LocalMHA: Module {
+public class LocalMHA: Module, UnaryLayer {
     let norm: LayerNorm
     let heads: Int
     let windowSize: Int
     @ModuleInfo(key: "to_qkv") var toQKV: Linear
-    let relPos: SinusoidalEmbeddings?
-    let toOut: Linear
-    
+    @ModuleInfo(key: "rel_pos") var relPos: SinusoidalEmbeddings?
+    @ModuleInfo(key: "to_out") var toOut: Linear
+
     public init(dim: Int = 1024, windowSize: Int = 32, dimHead: Int = 64, useRotaryPosEmb: Bool = true) {
         self.norm = LayerNorm(dimensions: dim)
         self.heads = dim / dimHead
         self.windowSize = windowSize
         self._toQKV.wrappedValue = Linear(dim, dim * 3, bias: false)
-        self.relPos = useRotaryPosEmb ? SinusoidalEmbeddings(dim: dimHead, scaleBase: Float(windowSize / 2)) : nil
-        self.toOut = Linear(dim, dim, bias: false)
+        self._relPos.wrappedValue = useRotaryPosEmb ? SinusoidalEmbeddings(dim: dimHead, scaleBase: Float(windowSize / 2)) : nil
+        self._toOut.wrappedValue = Linear(dim, dim, bias: false)
     }
     
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -99,20 +99,20 @@ public class LocalMHA: Module {
 // MARK: - Sinusoidal Embeddings
 
 public class SinusoidalEmbeddings: Module {
-    let invFreq: MLXArray
+    @ModuleInfo(key: "inv_freq") var invFreq: MLXArray
     let useXPos: Bool
     let scaleBase: Float?
-    let scale: MLXArray?
-    
+    var scale: MLXArray?
+
     public init(dim: Int, scaleBase: Float? = nil, useXPos: Bool = false) {
         let arange = MLXArray(stride(from: 0, to: dim, by: 2).map { Float($0) })
-        self.invFreq = 1.0 / pow(MLXArray(10000.0), arange / Float(dim))
-        
+        self._invFreq.wrappedValue = 1.0 / pow(MLXArray(10000.0), arange / Float(dim))
+
         self.useXPos = useXPos
         self.scaleBase = scaleBase
-        
+
         assert(!(useXPos && scaleBase == nil), "scale base must be defined if using xpos")
-        
+
         if useXPos {
             let arange = MLXArray(stride(from: 0, to: dim, by: 2).map { Float($0) })
             self.scale = (arange + 0.4 * Float(dim)) / (1.4 * Float(dim))

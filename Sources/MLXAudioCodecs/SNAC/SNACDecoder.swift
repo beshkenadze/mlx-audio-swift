@@ -18,7 +18,7 @@ public struct SNACConfiguration: Codable {
     public let vqStrides: [Int]
     public let noise: Bool
     public let depthwise: Bool
-    
+
     enum CodingKeys: String, CodingKey {
         case samplingRate = "sampling_rate"
         case encoderDim = "encoder_dim"
@@ -50,11 +50,11 @@ public class SNAC: Module {
     public let codebookDim: Int
     public let vqStrides: [Int]
     public let attnWindowSize: Int?
-    
+
     let encoder: Encoder
     let quantizer: ResidualVectorQuantize
     let decoder: Decoder
-    
+
     public init(
         samplingRate: Int = 44100,
         encoderDim: Int = 64,
@@ -74,34 +74,34 @@ public class SNAC: Module {
         self.encoderRates = encoderRates
         self.decoderDim = decoderDim
         self.decoderRates = decoderRates
-        
+
         // Calculate latent_dim if not provided
         let calculatedLatentDim = latentDim ?? (encoderDim * Int(pow(2.0, Double(encoderRates.count))))
         self.latentDim = calculatedLatentDim
-        
+
         // Calculate hop_length (product of encoder rates)
         self.hopLength = encoderRates.reduce(1, *)
-        
+
         self.nCodebooks = vqStrides.count
         self.codebookSize = codebookSize
         self.codebookDim = codebookDim
         self.vqStrides = vqStrides
         self.attnWindowSize = attnWindowSize
-        
+
         self.encoder = Encoder(
             dModel: encoderDim,
             strides: encoderRates,
             depthwise: depthwise,
             attnWindowSize: attnWindowSize
         )
-        
+
         self.quantizer = ResidualVectorQuantize(
             inputDim: calculatedLatentDim,
             codebookSize: codebookSize,
             codebookDim: codebookDim,
             vqStrides: vqStrides
         )
-        
+
         self.decoder = Decoder(
             inputChannel: calculatedLatentDim,
             channels: decoderDim,
@@ -111,61 +111,61 @@ public class SNAC: Module {
             attnWindowSize: attnWindowSize
         )
     }
-    
+
     public func preprocess(_ audioData: MLXArray) -> MLXArray {
         let length = audioData.shape[audioData.ndim - 1]
-        
+
         // Calculate LCM of all vq_strides
         var lcmValue = vqStrides[0]
         for i in 1..<vqStrides.count {
             lcmValue = lcm(lcmValue, vqStrides[i])
         }
-        
+
         // Include attention window size in LCM calculation if present
         if let attnWindowSize = attnWindowSize {
             lcmValue = lcm(lcmValue, attnWindowSize)
         }
-        
+
         let padTo = hopLength * lcmValue
         let rightPad = Int(ceil(Double(length) / Double(padTo))) * padTo - length
-        
+
         // Pad the audio data: [(0, 0), (0, 0), (0, right_pad)]
         return audioData.padded([(0, 0), (0, 0), (0, rightPad)])
     }
-    
+
     public func callAsFunction(_ audioData: MLXArray) -> (MLXArray, [MLXArray]) {
         let length = audioData.shape[audioData.ndim - 1]
         let preprocessed = preprocess(audioData)
-        
-        let z = encoder(preprocessed.swappedAxes(1, 2))
+
+        let z = encoder(preprocessed)
         let (zQ, codes) = quantizer(z)
         let audioHat = decoder(zQ)
-        
+
         // Trim to original length
         let trimmed = audioHat[.ellipsis, 0..<length]
         return (trimmed, codes)
     }
-    
+
     public func encode(_ audioData: MLXArray) -> [MLXArray] {
         let preprocessed = preprocess(audioData)
-        let z = encoder(preprocessed.swappedAxes(1, 2))
+        let z = encoder(preprocessed)
         let (_, codes) = quantizer(z)
         return codes
     }
-    
+
     public func decode(_ codes: [MLXArray]) -> MLXArray {
         let zQ = quantizer.fromCodes(codes)
-        let audioHat = decoder(zQ.swappedAxes(1, 2))
+        let audioHat = decoder(zQ)
         return audioHat
     }
-    
+
     // MARK: - Loading Methods
-    
+
     public static func fromConfig(_ configPath: URL) throws -> SNAC {
         let data = try Data(contentsOf: configPath)
         let decoder = JSONDecoder()
         let config = try decoder.decode(SNACConfiguration.self, from: data)
-        
+
         return SNAC(
             samplingRate: config.samplingRate,
             encoderDim: config.encoderDim,
@@ -181,25 +181,25 @@ public class SNAC: Module {
             depthwise: config.depthwise
         )
     }
-    
+
     public static func fromPretrained(_ modelRepo: String) async throws -> SNAC {
         let client = HubClient.default
-        
+
         let snapshotDir = FileManager.default.temporaryDirectory
-        
+
         let progress = Progress(totalUnitCount: 0)
-        
+
         Task {
             for await value in progress.publisher(for: \.fractionCompleted).values {
                 print("Snapshot download progress: \(value * 100)%")
             }
         }
-        
+
         guard let repoID = Repo.ID(rawValue: modelRepo) else {
             throw NSError(domain: "SNAC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid repository ID: \(modelRepo)"])
         }
-    
-        
+
+
         let modelDir = try await client.downloadSnapshot(
             of: repoID,
             kind: .model,
@@ -210,21 +210,21 @@ public class SNAC: Module {
             // Accurate progress per file
             print("\(progress.completedUnitCount)/\(progress.totalUnitCount) files")
         })
-        
-        
+
+
         let configPath = modelDir.appendingPathComponent("config.json")
         let weightsPath = modelDir.appendingPathComponent("model.safetensors")
-        
+
         guard FileManager.default.fileExists(atPath: weightsPath.path) else {
             throw SNACError.modelNotFound("Could not find model at \(weightsPath.path)")
         }
-        
+
         let snac = try fromConfig(configPath)
-        
+
         let weights = try loadArrays(url: weightsPath)
         try snac.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
         eval(snac)
-        
+
         return snac
     }
 }
@@ -257,8 +257,8 @@ public enum SNACError: Error {
 
 extension MLXArray {
     func padded(_ padWidths: [(Int, Int)]) -> MLXArray {
-        // Convert [(Int, Int)] to the format MLX expects
-        let paddingArray = padWidths.flatMap { [$0.0, $0.1] }
-        return MLX.padded(self, widths: paddingArray as! [IntOrPair])
+        // Convert [(Int, Int)] to [IntOrPair]
+        let paddingArray = padWidths.map { IntOrPair($0) }
+        return MLX.padded(self, widths: paddingArray)
     }
 }
