@@ -26,5 +26,7 @@
     <string></string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>HF_TOKEN</key>
+    <string></string>
 </dict>
 </plist>
