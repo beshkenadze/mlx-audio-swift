@@ -7,6 +7,7 @@
 
 import Foundation
 import MLX
+import MLXAudioCodecs
 import MLXNN
 
 // MARK: - Interpolate 1D
