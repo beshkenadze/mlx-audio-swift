@@ -7,9 +7,27 @@ public final class WhisperSession: @unchecked Sendable {
     private var currentTask: Task<Void, Never>?
     private let taskLock = NSLock()
 
-    private init(modelType: WhisperModel, streamingConfig: StreamingConfig) {
+    private let encoder: AudioEncoder
+    private let decoder: TextDecoder
+    private let tokenizer: WhisperTokenizer
+    private let config: WhisperConfiguration
+    private let alignmentHeads: [(layer: Int, head: Int)]
+
+    private init(
+        modelType: WhisperModel,
+        streamingConfig: StreamingConfig,
+        encoder: AudioEncoder,
+        decoder: TextDecoder,
+        tokenizer: WhisperTokenizer,
+        config: WhisperConfiguration
+    ) {
         self.modelType = modelType
         self.streamingConfig = streamingConfig
+        self.encoder = encoder
+        self.decoder = decoder
+        self.tokenizer = tokenizer
+        self.config = config
+        self.alignmentHeads = WhisperAlignmentHeads.heads(for: modelType)
     }
 
     // MARK: - Factory
@@ -21,11 +39,28 @@ public final class WhisperSession: @unchecked Sendable {
     ) async throws -> WhisperSession {
         progressHandler?(.downloading(0))
 
-        // TODO: Implement model downloading and loading
+        let loaded = try await WhisperModelLoader.load(
+            model: model,
+            progressHandler: { progress in
+                let fraction = Float(progress.fractionCompleted)
+                progressHandler?(.downloading(fraction * 0.8))
+            }
+        )
+
+        progressHandler?(.loading(0.9))
+
+        let tokenizer = try await WhisperTokenizer(pretrained: WhisperModelLoader.repoId(for: model))
 
         progressHandler?(.loading(1.0))
 
-        return WhisperSession(modelType: model, streamingConfig: streaming)
+        return WhisperSession(
+            modelType: model,
+            streamingConfig: streaming,
+            encoder: loaded.encoder,
+            decoder: loaded.decoder,
+            tokenizer: tokenizer,
+            config: loaded.config
+        )
     }
 
     // MARK: - Transcription (Streaming)
