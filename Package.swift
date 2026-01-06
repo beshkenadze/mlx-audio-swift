@@ -1,44 +1,35 @@
 // swift-tools-version:5.9
 import PackageDescription
 
+// NOTE: TTS targets are temporarily disabled due to path issues.
+// The ESpeakNG.xcframework is located at MLXAudio/Kokoro/Frameworks/ but Package.swift
+// expects it at mlx_audio_swift/tts/MLXAudio/Kokoro/Frameworks/.
+// This will be resolved when the TTS module structure is updated.
+
 let package = Package(
     name: "mlx-audio",
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(
-            name: "MLXAudio",
-            targets: ["MLXAudio", "ESpeakNG"]
+            name: "MLXAudioSTT",
+            targets: ["MLXAudioSTT"]
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", branch: "main"),
-        .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.1.0")),
-        .package(url: "https://github.com/aespinilla/Tiktoken", branch: "main"),
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.29.0"),
     ],
     targets: [
-        .binaryTarget(
-            name: "ESpeakNG",
-            path: "mlx_audio_swift/tts/MLXAudio/Kokoro/Frameworks/ESpeakNG.xcframework"
-        ),
         .target(
-            name: "MLXAudio",
+            name: "MLXAudioSTT",
             dependencies: [
-                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
-                .product(name: "MLXLLM", package: "mlx-swift-lm"),
-                .product(name: "Transformers", package: "swift-transformers"),
-                .product(name: "Tiktoken", package: "Tiktoken"),
-                "ESpeakNG"
+                .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "mlx_audio_swift/tts/MLXAudio",
-            exclude: ["Preview Content", "Assets.xcassets", "MLXAudioApp.swift", "MLXAudio.entitlements"],
-            resources: [
-                .process("Kokoro/Resources") // Kokoro voices
-            ]
+            path: "mlx_audio_swift/stt/MLXAudioSTT"
         ),
         .testTarget(
-            name: "MLXAudioTests",
-            dependencies: ["MLXAudio"],
-            path: "mlx_audio_swift/tts/Tests"
+            name: "MLXAudioSTTTests",
+            dependencies: ["MLXAudioSTT"],
+            path: "mlx_audio_swift/stt/Tests"
         ),
     ]
 )
