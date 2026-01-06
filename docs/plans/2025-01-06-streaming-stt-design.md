@@ -3,6 +3,7 @@
 > **Date**: 2025-01-06
 > **Branch**: feat/streaming-stt
 > **Status**: Approved for implementation
+> **Last Review**: 2026-01-06 (Expert Panel)
 
 ---
 
@@ -85,18 +86,25 @@ public final class WhisperSession: STTSession, @unchecked Sendable {
 
     public func transcribe(
         _ audio: MLXArray,
-        sampleRate: Int = 16000
+        sampleRate: Int = 16000,
+        options: TranscriptionOptions = .default
     ) -> AsyncThrowingStream<StreamingResult, Error>
 
     public func transcribe(
         _ audio: MLXArray,
-        sampleRate: Int = 16000
+        sampleRate: Int = 16000,
+        options: TranscriptionOptions = .default
     ) async throws -> String
 
     // MARK: - Lifecycle
 
     public func cancel()
     public func cleanupMemory()
+
+    // MARK: - Memory Management
+
+    /// Estimated GPU memory for current model (bytes)
+    public var estimatedMemoryUsage: Int { get }
 }
 ```
 
@@ -115,6 +123,25 @@ public struct StreamingConfig: Sendable {
     )
 }
 
+public struct TranscriptionOptions: Sendable {
+    public var language: String?              // nil = auto-detect
+    public var task: Task                     // .transcribe or .translate
+    public var timeout: TimeInterval          // Default: 30.0
+    public var temperature: Float             // Default: 0.0 (greedy)
+
+    public enum Task: String, Sendable {
+        case transcribe
+        case translate  // Always to English
+    }
+
+    public static let `default` = TranscriptionOptions(
+        language: nil,
+        task: .transcribe,
+        timeout: 30.0,
+        temperature: 0.0
+    )
+}
+
 public enum WhisperModel: String, CaseIterable, Sendable {
     case tiny = "mlx-community/whisper-tiny-mlx"
     case base = "mlx-community/whisper-base-mlx"
@@ -125,25 +152,79 @@ public enum WhisperModel: String, CaseIterable, Sendable {
 }
 ```
 
-### Usage Example
+### Usage Examples
+
+#### Basic Streaming Transcription
 
 ```swift
-// Create session
-let session = try await WhisperSession.fromPretrained(
-    model: .largeTurbo,
-    streaming: .default
-) { progress in
-    print("Loading: \(progress)")
-}
+// Given: A loaded WhisperSession and audio buffer
+let session = try await WhisperSession.fromPretrained(model: .largeTurbo)
+let audioBuffer: MLXArray = loadAudio("speech.wav")
 
-// Streaming transcription
+// When: Streaming transcription is started
+var partialCount = 0
+var finalText = ""
 for try await result in session.transcribe(audioBuffer, sampleRate: 16000) {
     if result.isFinal {
-        print("Final: \(result.text)")
+        finalText = result.text
     } else {
-        print("Partial: \(result.text)")
+        partialCount += 1
     }
 }
+
+// Then: Partial results were emitted before final
+assert(partialCount > 0, "Should emit partial results")
+assert(!finalText.isEmpty, "Should have final transcription")
+```
+
+#### Cancellation
+
+```swift
+// Given: An ongoing transcription
+let stream = session.transcribe(longAudio, sampleRate: 16000)
+let task = Task {
+    for try await _ in stream { }
+}
+
+// When: Cancelled after 500ms
+try await Task.sleep(for: .milliseconds(500))
+session.cancel()
+
+// Then: Task completes with cancellation error
+do {
+    try await task.value
+} catch WhisperError.cancelled {
+    // Expected
+}
+```
+
+#### Translation to English
+
+```swift
+// Given: Non-English audio
+let options = TranscriptionOptions(language: "ja", task: .translate)
+
+// When: Transcribing with translate task
+let result = try await session.transcribe(japaneseAudio, options: options)
+
+// Then: Output is in English
+assert(result.contains(englishWord))
+```
+
+### Thread-Safety Contract
+
+```swift
+/// WhisperSession is thread-safe with the following guarantees:
+///
+/// - `fromPretrained()`: Safe to call from any thread
+/// - `transcribe()`: Safe to call concurrently, but only ONE transcription
+///   runs at a time. Subsequent calls wait for the current one to complete.
+/// - `cancel()`: Safe to call from any thread, cancels current transcription
+/// - `cleanupMemory()`: NOT safe during active transcription
+///
+/// Internal synchronization uses Swift actors for state management.
+/// The MLX compute graph executes on GPU; avoid calling from main thread
+/// to prevent UI blocking during model loading.
 ```
 
 ---
@@ -243,8 +324,9 @@ public enum WhisperAlignmentHeads {
         case .largeV3:
             return [(10,12), (13,17), (16,11), ...] // 23 heads
         case .largeTurbo:
-            // 4 decoder layers — needs empirical testing
-            return [(0,0), (1,0), (2,0), (3,0)] // TODO: optimize
+            // 4 decoder layers — provisional values, requires validation
+            // Based on layer structure: use all heads from layers 1-3
+            return [(1,0), (1,1), (2,0), (2,1), (3,0), (3,1)]
         }
     }
 }
@@ -273,14 +355,40 @@ public enum WhisperError: LocalizedError, Sendable {
     // Audio Processing
     case invalidAudioFormat(expected: String, got: String)
     case audioTooShort(minSeconds: Double)
+    case sampleRateMismatch(expected: Int, got: Int)
 
     // Transcription
     case encodingFailed(String)
     case decodingFailed(String)
     case cancelled
+    case timeout(TimeInterval)
 
     // Tokenizer
     case tokenizerLoadFailed(String)
+
+    // Memory
+    case insufficientMemory(required: Int, available: Int)
+
+    // MARK: - Recovery Suggestions
+
+    public var recoverySuggestion: String? {
+        switch self {
+        case .modelNotFound:
+            return "Check network connection and try again"
+        case .modelDownloadFailed:
+            return "Verify URL and retry, or use a local model path"
+        case .sampleRateMismatch(let expected, _):
+            return "Resample audio to \(expected) Hz before transcription"
+        case .audioTooShort(let min):
+            return "Provide audio at least \(min) seconds long"
+        case .timeout:
+            return "Try smaller audio chunks or increase timeout"
+        case .insufficientMemory:
+            return "Use a smaller model (tiny/base) or free GPU memory"
+        default:
+            return nil
+        }
+    }
 }
 ```
 
@@ -390,6 +498,25 @@ func testTranscribeStreaming_emitsPartialResults()
 func testCancel_stopsTranscription()
 ```
 
+### Edge Case Tests
+
+```swift
+// Audio edge cases
+func testTranscribe_emptyAudio_throwsAudioTooShort()
+func testTranscribe_silenceOnly_returnsEmptyOrTimestamps()
+func testTranscribe_veryLongAudio_chunksCorrectly()
+func testTranscribe_wrongSampleRate_throwsMismatch()
+
+// Concurrency edge cases
+func testTranscribe_concurrentCalls_serialized()
+func testCancel_duringModelLoad_handledGracefully()
+func testCleanupMemory_duringTranscription_waitsOrThrows()
+
+// Memory edge cases
+func testFromPretrained_insufficientMemory_throwsError()
+func testTranscribe_afterCleanup_reloadsModel()
+```
+
 ### Benchmark Tests
 
 ```swift
@@ -412,7 +539,36 @@ Tests/STT/Resources/
 
 ---
 
-## 8. Dependencies
+## 8. Performance Requirements (NFRs)
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Latency to first token | < 1.5s | Time from audio start to first `StreamingResult` |
+| Real-time factor (RTF) | < 0.1 | Processing time / audio duration |
+| Memory (large-v3-turbo) | < 2GB | GPU memory during transcription |
+| Memory (tiny) | < 200MB | GPU memory during transcription |
+| Cancellation latency | < 100ms | Time from `cancel()` to stream termination |
+
+### Memory Estimation by Model
+
+```swift
+public extension WhisperModel {
+    var estimatedMemoryMB: Int {
+        switch self {
+        case .tiny:      return 150
+        case .base:      return 290
+        case .small:     return 970
+        case .medium:    return 3100
+        case .largeV3:   return 6200
+        case .largeTurbo: return 1600
+        }
+    }
+}
+```
+
+---
+
+## 9. Dependencies
 
 | Dependency | Purpose | Status |
 |------------|---------|--------|
