@@ -108,8 +108,13 @@ public class WhisperMultiHeadAttention: Module {
 
 /// Key-Value cache for incremental decoding in autoregressive generation
 public class KVCache {
-    private var keys: MLXArray?
-    private var values: MLXArray?
+    private var _keys: MLXArray?
+    private var _values: MLXArray?
+
+    /// Current sequence length in the cache (0 if empty)
+    public var sequenceLength: Int {
+        _keys?.shape[1] ?? 0
+    }
 
     public init() {}
 
@@ -119,19 +124,19 @@ public class KVCache {
     ///   - values: New value tensor, shape [batch, new_seq, dim]
     /// - Returns: Concatenated (keys, values) including history
     public func update(keys newKeys: MLXArray, values newValues: MLXArray) -> (MLXArray, MLXArray) {
-        if let existingKeys = keys, let existingValues = values {
-            keys = concatenated([existingKeys, newKeys], axis: 1)
-            values = concatenated([existingValues, newValues], axis: 1)
+        if let existingKeys = _keys, let existingValues = _values {
+            _keys = concatenated([existingKeys, newKeys], axis: 1)
+            _values = concatenated([existingValues, newValues], axis: 1)
         } else {
-            keys = newKeys
-            values = newValues
+            _keys = newKeys
+            _values = newValues
         }
-        return (keys!, values!)
+        return (_keys!, _values!)
     }
 
     /// Reset the cache, clearing all stored keys and values
     public func reset() {
-        keys = nil
-        values = nil
+        _keys = nil
+        _values = nil
     }
 }
