@@ -71,6 +71,13 @@ public final class WhisperSession: @unchecked Sendable {
         options: TranscriptionOptions = .default
     ) -> AsyncThrowingStream<StreamingResult, Error> {
         AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] _ in
+                self?.taskLock.withLock {
+                    self?.currentTask?.cancel()
+                    self?.currentTask = nil
+                }
+            }
+
             self.taskLock.withLock {
                 self.currentTask = Task {
                     do {
@@ -182,10 +189,19 @@ public final class WhisperSession: @unchecked Sendable {
                             }
                         }
 
+                        self.taskLock.withLock {
+                            self.currentTask = nil
+                        }
                         continuation.finish()
                     } catch is CancellationError {
+                        self.taskLock.withLock {
+                            self.currentTask = nil
+                        }
                         continuation.finish(throwing: WhisperError.cancelled)
                     } catch {
+                        self.taskLock.withLock {
+                            self.currentTask = nil
+                        }
                         continuation.finish(throwing: error)
                     }
                 }
