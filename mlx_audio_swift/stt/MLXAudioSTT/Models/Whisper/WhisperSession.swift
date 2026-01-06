@@ -81,19 +81,106 @@ public final class WhisperSession: @unchecked Sendable {
                             )
                         }
 
-                        // TODO: Implement actual streaming transcription loop
-                        // 1. Compute mel spectrogram
-                        // 2. Encode audio
-                        // 3. Decode with AlignAtt streaming
-                        // 4. Yield StreamingResult for each stable token
-
                         try Task.checkCancellation()
 
-                        continuation.yield(StreamingResult(
-                            text: "[Transcription not yet implemented]",
-                            isFinal: true,
-                            timestamp: 0...0
-                        ))
+                        // 1. Pad/trim audio to 30 seconds
+                        let paddedAudio = AudioUtils.padOrTrim(audio, length: AudioConstants.nSamples)
+
+                        // 2. Compute mel spectrogram
+                        let mel = try MelSpectrogram.compute(audio: paddedAudio)
+                        // Add batch dimension: [nMels, nFrames] -> [1, nMels, nFrames]
+                        let melBatched = mel.expandedDimensions(axis: 0)
+
+                        // 3. Encode audio
+                        let encoderOutput = self.encoder(melBatched)
+                        let totalFrames = encoderOutput.shape[1]
+
+                        // 4. Initialize decoder state
+                        var tokens = self.tokenizer.initialTokens(
+                            language: options.language,
+                            task: options.task
+                        )
+
+                        // Create KV cache for each decoder layer
+                        let kvCaches: [KVCache] = (0..<self.config.nTextLayer).map { _ in KVCache() }
+                        var emittedText = ""
+                        var lastEmittedIndex = tokens.count
+
+                        // 5. Decoding loop
+                        let maxTokens = self.config.nTextCtx - tokens.count
+                        let audioDuration = Double(audio.shape[0]) / Double(AudioConstants.sampleRate)
+
+                        for step in 0..<maxTokens {
+                            try Task.checkCancellation()
+
+                            // Create token array for decoder
+                            let tokenArray: MLXArray
+                            if step == 0 {
+                                tokenArray = MLXArray(tokens).expandedDimensions(axis: 0)
+                            } else {
+                                tokenArray = MLXArray([tokens.last!]).expandedDimensions(axis: 0)
+                            }
+
+                            // Decode one step
+                            let (logits, crossQKArrays) = self.decoder(
+                                tokens: tokenArray,
+                                encoderOutput: encoderOutput,
+                                kvCache: kvCaches
+                            )
+
+                            // Convert [MLXArray] to [MLXArray?] for StreamingDecoder
+                            let crossQK: [MLXArray?] = crossQKArrays.map { $0 }
+
+                            // Sample next token (greedy)
+                            let nextToken = Int(MLX.argMax(logits[0, -1]).item(Int.self))
+
+                            // Check for end of transcription
+                            if nextToken == WhisperTokenizer.eotToken {
+                                let finalTokens = Array(tokens.dropFirst(lastEmittedIndex))
+                                let finalText = self.tokenizer.decode(finalTokens)
+                                let fullText = emittedText + finalText
+                                if !fullText.isEmpty {
+                                    continuation.yield(StreamingResult(
+                                        text: fullText.trimmingCharacters(in: .whitespaces),
+                                        isFinal: true,
+                                        timestamp: 0...audioDuration
+                                    ))
+                                }
+                                break
+                            }
+
+                            tokens.append(nextToken)
+
+                            // AlignAtt: Check if we should emit
+                            let mostAttendedFrame = StreamingDecoder.getMostAttendedFrame(
+                                crossQK: crossQK,
+                                alignmentHeads: self.alignmentHeads
+                            )
+
+                            let shouldEmit = StreamingDecoder.shouldEmit(
+                                mostAttendedFrame: mostAttendedFrame,
+                                totalContentFrames: totalFrames,
+                                threshold: self.streamingConfig.frameThreshold
+                            )
+
+                            if shouldEmit && self.streamingConfig.emitPartial {
+                                let newTokens = Array(tokens[lastEmittedIndex...])
+                                let newText = self.tokenizer.decode(newTokens)
+
+                                if !newText.isEmpty {
+                                    emittedText += newText
+                                    lastEmittedIndex = tokens.count
+
+                                    let frameTime = Double(mostAttendedFrame) / 100.0
+
+                                    continuation.yield(StreamingResult(
+                                        text: emittedText.trimmingCharacters(in: .whitespaces),
+                                        isFinal: false,
+                                        timestamp: 0...frameTime
+                                    ))
+                                }
+                            }
+                        }
 
                         continuation.finish()
                     } catch is CancellationError {
