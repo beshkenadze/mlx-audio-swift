@@ -110,10 +110,11 @@ public class WhisperMultiHeadAttention: Module {
 public class KVCache {
     private var _keys: MLXArray?
     private var _values: MLXArray?
+    private let lock = NSLock()
 
     /// Current sequence length in the cache (0 if empty)
     public var sequenceLength: Int {
-        _keys?.shape[1] ?? 0
+        lock.withLock { _keys?.shape[1] ?? 0 }
     }
 
     public init() {}
@@ -124,19 +125,23 @@ public class KVCache {
     ///   - values: New value tensor, shape [batch, new_seq, dim]
     /// - Returns: Concatenated (keys, values) including history
     public func update(keys newKeys: MLXArray, values newValues: MLXArray) -> (MLXArray, MLXArray) {
-        if let existingKeys = _keys, let existingValues = _values {
-            _keys = concatenated([existingKeys, newKeys], axis: 1)
-            _values = concatenated([existingValues, newValues], axis: 1)
-        } else {
-            _keys = newKeys
-            _values = newValues
+        lock.withLock {
+            if let existingKeys = _keys, let existingValues = _values {
+                _keys = concatenated([existingKeys, newKeys], axis: 1)
+                _values = concatenated([existingValues, newValues], axis: 1)
+            } else {
+                _keys = newKeys
+                _values = newValues
+            }
+            return (_keys!, _values!)
         }
-        return (_keys!, _values!)
     }
 
     /// Reset the cache, clearing all stored keys and values
     public func reset() {
-        _keys = nil
-        _values = nil
+        lock.withLock {
+            _keys = nil
+            _values = nil
+        }
     }
 }
