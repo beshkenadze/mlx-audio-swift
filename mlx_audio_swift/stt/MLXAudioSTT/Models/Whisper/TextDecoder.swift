@@ -7,7 +7,7 @@ import MLXNN
 /// Captures cross-attention weights for AlignAtt streaming
 public class TextDecoder: Module {
     @ModuleInfo public var tokenEmbedding: Embedding
-    @ModuleInfo public var positionalEmbedding: MLXArray
+    @ParameterInfo(key: "positional_embedding") public var positionalEmbedding: MLXArray
     @ModuleInfo(key: "blocks") public var blocks: [ResidualAttentionBlock]
     @ModuleInfo public var ln: LayerNorm
 
