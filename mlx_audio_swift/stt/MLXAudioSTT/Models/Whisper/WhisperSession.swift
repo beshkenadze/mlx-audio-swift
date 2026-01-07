@@ -94,7 +94,7 @@ public final class WhisperSession: @unchecked Sendable {
                         let paddedAudio = AudioUtils.padOrTrim(audio, length: AudioConstants.nSamples)
 
                         // 2. Compute mel spectrogram
-                        let mel = try MelSpectrogram.compute(audio: paddedAudio)
+                        let mel = try MelSpectrogram.compute(audio: paddedAudio, nMels: self.config.nMels)
                         // Add batch dimension: [nMels, nFrames] -> [1, nMels, nFrames]
                         let melBatched = mel.expandedDimensions(axis: 0)
 

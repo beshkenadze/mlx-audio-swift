@@ -7,9 +7,11 @@ import MLX
 public enum MelSpectrogram {
 
     /// Compute mel spectrogram from audio waveform
-    /// - Parameter audio: Audio samples as MLXArray, shape [nSamples]
+    /// - Parameters:
+    ///   - audio: Audio samples as MLXArray, shape [nSamples]
+    ///   - nMels: Number of mel frequency bins (80 for v1/v2, 128 for v3)
     /// - Returns: Mel spectrogram as MLXArray, shape [nMels, nFrames]
-    public static func compute(audio: MLXArray) throws -> MLXArray {
+    public static func compute(audio: MLXArray, nMels: Int = AudioConstants.nMels) throws -> MLXArray {
         let samples = audio.asArray(Float.self)
         let nSamples = samples.count
 
@@ -54,11 +56,11 @@ public enum MelSpectrogram {
         }
 
         // Apply mel filterbank
-        let melFilters = createMelFilterbank()
+        let melFilters = createMelFilterbank(nMels: nMels)
         var melSpec = [[Float]](
-            repeating: [Float](repeating: 0, count: nFrames), count: AudioConstants.nMels)
+            repeating: [Float](repeating: 0, count: nFrames), count: nMels)
 
-        for mel in 0..<AudioConstants.nMels {
+        for mel in 0..<nMels {
             for frame in 0..<nFrames {
                 var sum: Float = 0
                 for bin in 0..<numBins {
@@ -81,7 +83,7 @@ public enum MelSpectrogram {
 
         // Convert to MLXArray [nMels, nFrames]
         let flatData = normalizedSpec.flatMap { $0 }
-        return MLXArray(flatData, [AudioConstants.nMels, nFrames])
+        return MLXArray(flatData, [nMels, nFrames])
     }
 
     // MARK: - Private Helpers
@@ -136,9 +138,8 @@ public enum MelSpectrogram {
         return result
     }
 
-    private static func createMelFilterbank() -> [[Float]] {
+    private static func createMelFilterbank(nMels: Int) -> [[Float]] {
         let nFFT = AudioConstants.nFFT
-        let nMels = AudioConstants.nMels
         let sampleRate = AudioConstants.sampleRate
         let numBins = nFFT / 2 + 1
 
