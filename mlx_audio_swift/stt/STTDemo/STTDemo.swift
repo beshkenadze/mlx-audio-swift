@@ -5,82 +5,325 @@ import MLXAudioSTT
 
 @main
 struct STTDemo {
+    enum ProcessingMode: String, CaseIterable {
+        case short
+        case long
+        case auto
+
+        var description: String {
+            switch self {
+            case .short: return "Use WhisperSession directly (for audio <30s)"
+            case .long: return "Use LongAudioProcessor with chunking"
+            case .auto: return "Auto-select based on audio duration"
+            }
+        }
+    }
+
+    enum ChunkingStrategy: String, CaseIterable {
+        case sequential
+        case vad
+        case sliding
+        case auto
+
+        var description: String {
+            switch self {
+            case .sequential: return "Sequential fixed-size chunks"
+            case .vad: return "Voice Activity Detection based chunking"
+            case .sliding: return "Sliding window with overlap"
+            case .auto: return "Auto-select best strategy"
+            }
+        }
+
+        func toLongAudioStrategy() -> LongAudioProcessor.StrategyType {
+            switch self {
+            case .sequential:
+                return .sequential()
+            case .vad:
+                return .vad()
+            case .sliding:
+                return .slidingWindow()
+            case .auto:
+                return .auto
+            }
+        }
+    }
+
+    struct Config {
+        var audioPath: String
+        var modelName: String = "largeTurbo"
+        var mode: ProcessingMode = .auto
+        var strategy: ChunkingStrategy = .auto
+        var language: String?
+
+        static let autoThresholdSeconds: Double = 30.0
+    }
+
     static func main() async {
         let args = CommandLine.arguments
 
-        guard args.count >= 2 else {
+        guard args.count >= 2, args[1] != "--help", args[1] != "-h" else {
             printUsage()
             return
         }
 
-        let audioPath = args[1]
-        let modelName = args.count > 2 ? args[2] : "largeTurbo"
+        guard let config = parseArguments(args) else {
+            return
+        }
 
-        guard let model = parseModel(modelName) else {
-            print("Error: Unknown model '\(modelName)'")
+        guard let model = parseModel(config.modelName) else {
+            print("Error: Unknown model '\(config.modelName)'")
             print("Available models: tiny, base, small, medium, largeV3, largeTurbo")
             return
         }
 
         do {
-            let audio = try loadAudio(from: audioPath)
-            print("Loaded audio: \(audio.shape[0]) samples (\(String(format: "%.1f", Double(audio.shape[0]) / 16000.0))s)")
+            let audio = try loadAudio(from: config.audioPath)
+            let audioDuration = Double(audio.shape[0]) / Double(AudioConstants.sampleRate)
+            print("Loaded audio: \(audio.shape[0]) samples (\(String(format: "%.1f", audioDuration))s)")
 
-            print("\nLoading \(modelName) model...")
-            let session = try await WhisperSession.fromPretrained(
-                model: model,
-                progressHandler: { progress in
-                    switch progress {
-                    case .downloading(let fraction):
-                        print("\r  Downloading: \(Int(fraction * 100))%", terminator: "")
-                        fflush(stdout)
-                    case .loading(let fraction):
-                        if fraction >= 1.0 {
-                            print("\r  Loading: done        ")
-                        }
-                    case .encoding:
-                        print("  Encoding audio...")
-                    case .decoding:
-                        break
-                    }
-                }
-            )
+            let effectiveMode = resolveMode(config.mode, audioDuration: audioDuration)
+            print("Processing mode: \(effectiveMode.rawValue)")
 
-            print("\nTranscribing...")
-            print("─────────────────────────────────────────")
-
-            for try await result in session.transcribe(audio, sampleRate: AudioConstants.sampleRate) {
-                if result.isFinal {
-                    print("\r\(result.text)")
-                } else {
-                    print("\r\(result.text)...", terminator: "")
-                    fflush(stdout)
-                }
+            if effectiveMode == .long {
+                print("Chunking strategy: \(config.strategy.rawValue)")
             }
 
-            print("─────────────────────────────────────────")
-            print("Done!")
+            print("\nLoading \(config.modelName) model...")
+
+            switch effectiveMode {
+            case .short:
+                try await transcribeShort(audio: audio, model: model, language: config.language)
+            case .long, .auto:
+                try await transcribeLong(
+                    audio: audio,
+                    model: model,
+                    strategy: config.strategy,
+                    language: config.language
+                )
+            }
 
         } catch {
             print("Error: \(error)")
         }
     }
 
+    static func resolveMode(_ mode: ProcessingMode, audioDuration: Double) -> ProcessingMode {
+        switch mode {
+        case .auto:
+            return audioDuration > Config.autoThresholdSeconds ? .long : .short
+        case .short, .long:
+            return mode
+        }
+    }
+
+    static func transcribeShort(audio: MLXArray, model: WhisperModel, language: String?) async throws {
+        let session = try await WhisperSession.fromPretrained(
+            model: model,
+            progressHandler: createProgressHandler()
+        )
+
+        var options = TranscriptionOptions.default
+        options.language = language
+
+        print("\nTranscribing...")
+        print("─────────────────────────────────────────")
+
+        for try await result in session.transcribe(audio, sampleRate: AudioConstants.sampleRate, options: options) {
+            if result.isFinal {
+                print("\r\(result.text)")
+            } else {
+                print("\r\(result.text)...", terminator: "")
+                fflush(stdout)
+            }
+        }
+
+        print("─────────────────────────────────────────")
+        print("Done!")
+    }
+
+    static func transcribeLong(
+        audio: MLXArray,
+        model: WhisperModel,
+        strategy: ChunkingStrategy,
+        language: String?
+    ) async throws {
+        let processor = try await LongAudioProcessor.create(
+            model: model,
+            strategy: strategy.toLongAudioStrategy(),
+            progressHandler: createProgressHandler()
+        )
+
+        var options = TranscriptionOptions.default
+        options.language = language
+
+        print("\nTranscribing long audio...")
+        print("─────────────────────────────────────────")
+
+        let stream: AsyncThrowingStream<TranscriptionProgress, Error> = processor.transcribe(
+            audio,
+            sampleRate: AudioConstants.sampleRate,
+            options: options
+        )
+
+        for try await progress in stream {
+            let percent = Int(progress.progress * 100)
+            let chunkInfo = "[\(progress.chunkIndex + 1)/\(progress.totalChunks)]"
+            let timeInfo = String(format: "%.1f/%.1fs", progress.processedDuration, progress.audioDuration)
+
+            if progress.isFinal {
+                print("\r\u{1B}[K") // Clear line
+                print("Progress: 100% \(chunkInfo) \(timeInfo)")
+                print("─────────────────────────────────────────")
+                print(progress.text)
+            } else {
+                print("\rProgress: \(percent)% \(chunkInfo) \(timeInfo)", terminator: "")
+                fflush(stdout)
+            }
+        }
+
+        print("─────────────────────────────────────────")
+        print("Done!")
+    }
+
+    static func createProgressHandler() -> (WhisperProgress) -> Void {
+        return { progress in
+            switch progress {
+            case .downloading(let fraction):
+                print("\r  Downloading: \(Int(fraction * 100))%", terminator: "")
+                fflush(stdout)
+            case .loading(let fraction):
+                if fraction >= 1.0 {
+                    print("\r  Loading: done        ")
+                }
+            case .encoding:
+                print("  Encoding audio...")
+            case .decoding:
+                break
+            }
+        }
+    }
+
+    static func parseArguments(_ args: [String]) -> Config? {
+        var config = Config(audioPath: "")
+        var i = 1
+
+        while i < args.count {
+            let arg = args[i]
+
+            switch arg {
+            case "--audio", "-a":
+                guard i + 1 < args.count else {
+                    print("Error: --audio requires a file path")
+                    return nil
+                }
+                i += 1
+                config.audioPath = args[i]
+
+            case "--model", "-m":
+                guard i + 1 < args.count else {
+                    print("Error: --model requires a model name")
+                    return nil
+                }
+                i += 1
+                config.modelName = args[i]
+
+            case "--mode":
+                guard i + 1 < args.count else {
+                    print("Error: --mode requires a value (short|long|auto)")
+                    return nil
+                }
+                i += 1
+                guard let mode = ProcessingMode(rawValue: args[i]) else {
+                    print("Error: Invalid mode '\(args[i])'. Options: short, long, auto")
+                    return nil
+                }
+                config.mode = mode
+
+            case "--strategy":
+                guard i + 1 < args.count else {
+                    print("Error: --strategy requires a value (sequential|vad|sliding|auto)")
+                    return nil
+                }
+                i += 1
+                guard let strategy = ChunkingStrategy(rawValue: args[i]) else {
+                    print("Error: Invalid strategy '\(args[i])'. Options: sequential, vad, sliding, auto")
+                    return nil
+                }
+                config.strategy = strategy
+
+            case "--language", "-l":
+                guard i + 1 < args.count else {
+                    print("Error: --language requires a language code")
+                    return nil
+                }
+                i += 1
+                config.language = args[i]
+
+            default:
+                // Positional argument: treat first as audio path, second as model
+                if config.audioPath.isEmpty {
+                    config.audioPath = arg
+                } else if config.modelName == "largeTurbo" {
+                    config.modelName = arg
+                } else {
+                    print("Error: Unknown argument '\(arg)'")
+                    return nil
+                }
+            }
+
+            i += 1
+        }
+
+        if config.audioPath.isEmpty {
+            print("Error: Audio file path is required")
+            printUsage()
+            return nil
+        }
+
+        return config
+    }
+
     static func printUsage() {
         print("""
         STT Demo - Speech to Text using Whisper
 
-        Usage: stt-demo <audio-file> [model]
+        Usage: stt-demo <audio-file> [model] [options]
+               stt-demo --audio <file> [options]
 
         Arguments:
-          audio-file    Path to audio file (wav, mp3, m4a, etc.)
-          model         Model size (default: largeTurbo)
-                        Options: tiny, base, small, medium, largeV3, largeTurbo
+          audio-file              Path to audio file (wav, mp3, m4a, etc.)
+          model                   Model size (default: largeTurbo)
+
+        Options:
+          --audio, -a <file>      Path to audio file
+          --model, -m <model>     Model size: tiny, base, small, medium, largeV3, largeTurbo
+          --mode <mode>           Processing mode:
+                                    short  - Use WhisperSession directly (for audio <30s)
+                                    long   - Use LongAudioProcessor with chunking
+                                    auto   - Auto-select based on audio duration (default)
+          --strategy <strategy>   Chunking strategy for long audio mode:
+                                    sequential - Sequential fixed-size chunks
+                                    vad        - Voice Activity Detection based chunking
+                                    sliding    - Sliding window with overlap
+                                    auto       - Auto-select best strategy (default)
+          --language, -l <code>   Language code (e.g., en, ja, zh)
+          --help, -h              Show this help message
 
         Examples:
-          stt-demo speech.wav
-          stt-demo speech.mp3 tiny
-          stt-demo meeting.m4a medium
+          # Short audio (uses WhisperSession directly)
+          stt-demo test.wav
+
+          # Long audio with sliding window strategy
+          stt-demo --audio long.wav --mode long --strategy sliding
+
+          # Long audio with VAD chunking
+          stt-demo --audio long.wav --mode long --strategy vad
+
+          # Auto mode - choose based on audio duration
+          stt-demo --audio test.wav --mode auto
+
+          # Specify language
+          stt-demo speech.mp3 --language en
         """)
     }
 
