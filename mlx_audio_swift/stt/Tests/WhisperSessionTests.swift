@@ -16,7 +16,8 @@ struct WhisperSessionTests {
         let session = try await WhisperSession.fromPretrained(model: .largeTurbo)
         let audio = MLXArray.zeros([AudioConstants.nSamples])
 
-        let stream = session.transcribe(audio, sampleRate: AudioConstants.sampleRate)
+        // Use type annotation to get streaming version
+        let stream: AsyncThrowingStream<StreamingResult, Error> = session.transcribe(audio, sampleRate: AudioConstants.sampleRate)
 
         session.cancel()
 
@@ -38,7 +39,8 @@ struct WhisperSessionTests {
             streaming: .default
         )
 
-        #expect(session != nil)
+        // Session created successfully (type is non-optional)
+        _ = session
     }
 
     @Test func transcribe_validSampleRate_streams() async throws {
@@ -46,10 +48,30 @@ struct WhisperSessionTests {
         let audio = MLXArray.zeros([AudioConstants.nSamples])
 
         var results: [StreamingResult] = []
+        let stream: AsyncThrowingStream<StreamingResult, Error> = session.transcribe(audio, sampleRate: AudioConstants.sampleRate)
+        for try await result in stream {
+            results.append(result)
+        }
+
+        #expect(!results.isEmpty)
+        #expect(results.last?.isFinal == true)
+    }
+
+    @Test(.disabled("Requires network and model download"))
+    func transcribe_silentAudio_returnsEmptyOrMinimal() async throws {
+        // Given: A session with tiny model
+        let session = try await WhisperSession.fromPretrained(model: .tiny)
+
+        // Silent audio (1 second)
+        let audio = MLXArray.zeros([AudioConstants.sampleRate])
+
+        // When: Transcribing
+        var results: [StreamingResult] = []
         for try await result in session.transcribe(audio, sampleRate: AudioConstants.sampleRate) {
             results.append(result)
         }
 
+        // Then: Should complete (may have minimal output for silence)
         #expect(!results.isEmpty)
         #expect(results.last?.isFinal == true)
     }
