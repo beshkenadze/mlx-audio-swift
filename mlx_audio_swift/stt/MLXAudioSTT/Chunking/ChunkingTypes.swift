@@ -1,6 +1,15 @@
 import Foundation
 import MLX
 
+/// Abstraction for transcribing a single ≤30s chunk
+public protocol ChunkTranscriber: Sendable {
+    func transcribe(
+        audio: MLXArray,
+        sampleRate: Int,
+        previousTokens: [Int]?
+    ) async throws -> ChunkResult
+}
+
 /// Result from processing a single chunk
 public struct ChunkResult: Sendable {
     public let text: String
