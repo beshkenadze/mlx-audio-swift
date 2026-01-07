@@ -112,6 +112,7 @@ public final class WhisperSession: @unchecked Sendable {
                         let kvCaches: [KVCache] = (0..<self.config.nTextLayer).map { _ in KVCache() }
                         var emittedText = ""
                         var lastEmittedIndex = tokens.count
+                        var didEmitFinal = false
 
                         // 5. Decoding loop
                         let maxTokens = self.config.nTextCtx - tokens.count
@@ -153,6 +154,7 @@ public final class WhisperSession: @unchecked Sendable {
                                         timestamp: 0...audioDuration
                                     ))
                                 }
+                                didEmitFinal = true
                                 break
                             }
 
@@ -186,6 +188,29 @@ public final class WhisperSession: @unchecked Sendable {
                                         timestamp: 0...frameTime
                                     ))
                                 }
+                            }
+                        }
+
+                        // Emit final result if loop ended without EOT (e.g., maxTokens reached)
+                        if !didEmitFinal {
+                            let remainingTokens = Array(tokens[lastEmittedIndex...])
+                            if !remainingTokens.isEmpty {
+                                let remainingText = self.tokenizer.decode(remainingTokens)
+                                let fullText = emittedText + remainingText
+                                if !fullText.isEmpty {
+                                    continuation.yield(StreamingResult(
+                                        text: fullText.trimmingCharacters(in: .whitespaces),
+                                        isFinal: true,
+                                        timestamp: 0...audioDuration
+                                    ))
+                                }
+                            } else if !emittedText.isEmpty {
+                                // All tokens already emitted, just mark as final
+                                continuation.yield(StreamingResult(
+                                    text: emittedText.trimmingCharacters(in: .whitespaces),
+                                    isFinal: true,
+                                    timestamp: 0...audioDuration
+                                ))
                             }
                         }
 
