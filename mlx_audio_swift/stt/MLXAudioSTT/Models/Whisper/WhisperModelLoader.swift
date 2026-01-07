@@ -41,7 +41,8 @@ public enum WhisperModelLoader {
         progressHandler: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> LoadedModel {
         let repoId = repoId(for: model)
-        let hub = HubApi()
+        let cacheDir = URL.homeDirectory.appending(path: ".cache/huggingface/hub")
+        let hub = HubApi(downloadBase: cacheDir)
         let repo = Hub.Repo(id: repoId)
 
         let modelDirectory = try await hub.snapshot(
@@ -155,8 +156,8 @@ public enum WhisperModelLoader {
         var encoderWeights = [String: MLXArray]()
         var decoderWeights = [String: MLXArray]()
 
-        let encoderPrefix = "model.encoder."
-        let decoderPrefix = "model.decoder."
+        let encoderPrefix = "encoder."
+        let decoderPrefix = "decoder."
 
         for (key, value) in weights {
             if key.hasPrefix(encoderPrefix) {
