@@ -11,6 +11,10 @@ let package = Package(
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(
+            name: "SileroVAD",
+            targets: ["SileroVAD"]
+        ),
+        .library(
             name: "MLXAudioSTT",
             targets: ["MLXAudioSTT"]
         ),
@@ -26,8 +30,20 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "SileroVAD",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+            ],
+            path: "MLXAudio/SileroVAD",
+            resources: [
+                .copy("Resources/silero_vad_16k.safetensors")
+            ]
+        ),
+        .target(
             name: "MLXAudioSTT",
             dependencies: [
+                "SileroVAD",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "Transformers", package: "swift-transformers"),
