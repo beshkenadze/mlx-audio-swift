@@ -12,16 +12,22 @@ public enum MelSpectrogram {
     ///   - nMels: Number of mel frequency bins (80 for v1/v2, 128 for v3)
     /// - Returns: Mel spectrogram as MLXArray, shape [nMels, nFrames]
     public static func compute(audio: MLXArray, nMels: Int) throws -> MLXArray {
-        let samples = audio.asArray(Float.self)
-        let nSamples = samples.count
+        let rawSamples = audio.asArray(Float.self)
 
-        guard nSamples >= AudioConstants.hopLength else {
+        guard rawSamples.count >= AudioConstants.hopLength else {
             throw MelSpectrogramError.audioTooShort(
-                minSamples: AudioConstants.hopLength, actualSamples: nSamples)
+                minSamples: AudioConstants.hopLength, actualSamples: rawSamples.count)
         }
 
-        // Calculate number of frames
-        let nFrames = nSamples / AudioConstants.hopLength
+        // Calculate expected frame count (Whisper standard: rawSamples / hopLength)
+        let nFrames = rawSamples.count / AudioConstants.hopLength
+
+        // Center-pad audio (Whisper-style: pad by windowSize/2 on each side)
+        // This ensures all frames have full window coverage
+        let padAmount = AudioConstants.whisperWindowSize / 2
+        var samples = [Float](repeating: 0, count: padAmount)
+        samples.append(contentsOf: rawSamples)
+        samples.append(contentsOf: [Float](repeating: 0, count: padAmount))
 
         // Create Hann window (400 samples) zero-padded to FFT size (512)
         let window = paddedHannWindow(
@@ -42,12 +48,10 @@ public enum MelSpectrogram {
 
         for frame in 0..<nFrames {
             let start = frame * AudioConstants.hopLength
-            let end = min(start + AudioConstants.whisperWindowSize, nSamples)
 
-            // Extract and window frame (using whisperWindowSize, rest stays zero-padded)
+            // Extract and window frame (all frames now have full window coverage)
             var windowedFrame = [Float](repeating: 0, count: AudioConstants.nFFT)
-            let frameLength = end - start
-            for i in 0..<frameLength {
+            for i in 0..<AudioConstants.whisperWindowSize {
                 windowedFrame[i] = samples[start + i] * window[i]
             }
 

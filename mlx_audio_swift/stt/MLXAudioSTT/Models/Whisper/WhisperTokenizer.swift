@@ -315,9 +315,8 @@ public final class WhisperTokenizer: @unchecked Sendable {
 
     /// Get the vocabulary size
     public var vocabularySize: Int {
-        // Whisper uses a vocabulary of ~51,865 tokens
-        // The exact size depends on the model variant
-        51865
+        // Whisper vocabulary: 51,866 tokens (matches WhisperConfiguration.nVocab)
+        51866
     }
 
     /// Convert a single token to its ID
