@@ -7,7 +7,7 @@ struct MelSpectrogramTests {
     @Test func outputShapeIsCorrect() async throws {
         // 1 second of audio at 16kHz = 16000 samples
         let audio = MLXArray.zeros([16000])
-        let mel = try MelSpectrogram.compute(audio: audio)
+        let mel = try MelSpectrogram.compute(audio: audio, nMels: 80)
 
         // Expected: (nMels, nFrames) = (80, 100) for 1 second
         // 16000 samples / 160 hop = 100 frames
@@ -17,7 +17,7 @@ struct MelSpectrogramTests {
     @Test func fullChunkOutputShape() async throws {
         // Full 30-second chunk = 480000 samples
         let audio = MLXArray.zeros([480000])
-        let mel = try MelSpectrogram.compute(audio: audio)
+        let mel = try MelSpectrogram.compute(audio: audio, nMels: 80)
 
         // Expected: (80, 3000) for full chunk
         #expect(mel.shape == [80, 3000])
@@ -34,7 +34,7 @@ struct MelSpectrogramTests {
             samples[i] = Float(Foundation.sin(phase))
         }
         let audio = MLXArray(samples)
-        let mel = try MelSpectrogram.compute(audio: audio)
+        let mel = try MelSpectrogram.compute(audio: audio, nMels: 80)
 
         // Mel spectrogram should be log-scaled, typically in range [-4, 4] after normalization
         let maxVal = MLX.max(mel).item(Float.self)
@@ -46,7 +46,7 @@ struct MelSpectrogramTests {
     @Test func handlesShortAudio() async throws {
         // Very short audio: 0.1 second = 1600 samples
         let audio = MLXArray.zeros([1600])
-        let mel = try MelSpectrogram.compute(audio: audio)
+        let mel = try MelSpectrogram.compute(audio: audio, nMels: 80)
 
         // Expected: 1600 / 160 = 10 frames
         #expect(mel.shape == [80, 10])
@@ -54,7 +54,7 @@ struct MelSpectrogramTests {
 
     @Test func outputDTypeIsFloat32() async throws {
         let audio = MLXArray.zeros([16000])
-        let mel = try MelSpectrogram.compute(audio: audio)
+        let mel = try MelSpectrogram.compute(audio: audio, nMels: 80)
 
         #expect(mel.dtype == .float32)
     }

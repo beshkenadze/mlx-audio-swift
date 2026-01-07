@@ -11,7 +11,7 @@ public enum MelSpectrogram {
     ///   - audio: Audio samples as MLXArray, shape [nSamples]
     ///   - nMels: Number of mel frequency bins (80 for v1/v2, 128 for v3)
     /// - Returns: Mel spectrogram as MLXArray, shape [nMels, nFrames]
-    public static func compute(audio: MLXArray, nMels: Int = AudioConstants.nMels) throws -> MLXArray {
+    public static func compute(audio: MLXArray, nMels: Int) throws -> MLXArray {
         let samples = audio.asArray(Float.self)
         let nSamples = samples.count
 
