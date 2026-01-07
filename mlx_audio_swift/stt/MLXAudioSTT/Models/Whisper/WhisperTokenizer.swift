@@ -313,12 +313,6 @@ public final class WhisperTokenizer: @unchecked Sendable {
 
     // MARK: - Vocabulary Access
 
-    /// Get the vocabulary size
-    public var vocabularySize: Int {
-        // Whisper vocabulary: 51,866 tokens (matches WhisperConfiguration.nVocab)
-        51866
-    }
-
     /// Convert a single token to its ID
     /// - Parameter token: The token string
     /// - Returns: The token ID, or nil if not found
