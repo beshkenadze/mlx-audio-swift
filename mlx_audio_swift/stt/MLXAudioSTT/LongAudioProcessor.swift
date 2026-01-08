@@ -357,11 +357,6 @@ public final class LongAudioProcessor: @unchecked Sendable {
                             previousEndWords: previousChunkEndWords,
                             currentWords: nil
                         )
-                        // DEBUG
-                        print("[DEBUG] Chunk \(currentChunkIndex): dedup '\(result.method)' removed \(result.wordsRemoved) words")
-                        print("[DEBUG] previousEndWords: \(previousChunkEndWords)")
-                        print("[DEBUG] processedText: \(processedText.prefix(100))...")
-                        print("[DEBUG] textToAccumulate: \(result.text.prefix(100))...")
                         textToAccumulate = result.text
                     } else if !previousChunkEndWords.isEmpty {
                         textToAccumulate = deduplicateOverlapText(
