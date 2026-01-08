@@ -54,6 +54,7 @@ struct STTDemo {
         var mode: ProcessingMode = .auto
         var strategy: ChunkingStrategy = .auto
         var language: String?
+        var fast: Bool = false
 
         static let autoThresholdSeconds: Double = 30.0
     }
@@ -88,17 +89,19 @@ struct STTDemo {
                 print("Chunking strategy: \(config.strategy.rawValue)")
             }
 
-            print("\nLoading \(config.modelName) model...")
+            let loadingMode = config.fast ? "fast (int4)" : "default (float16)"
+            print("\nLoading \(config.modelName) model (\(loadingMode))...")
 
             switch effectiveMode {
             case .short:
-                try await transcribeShort(audio: audio, model: model, language: config.language)
+                try await transcribeShort(audio: audio, model: model, language: config.language, fast: config.fast)
             case .long, .auto:
                 try await transcribeLong(
                     audio: audio,
                     model: model,
                     strategy: config.strategy,
-                    language: config.language
+                    language: config.language,
+                    fast: config.fast
                 )
             }
 
@@ -116,19 +119,26 @@ struct STTDemo {
         }
     }
 
-    static func transcribeShort(audio: MLXArray, model: WhisperModel, language: String?) async throws {
+    static func transcribeShort(audio: MLXArray, model: WhisperModel, language: String?, fast: Bool) async throws {
+        let loadingOptions = fast ? ModelLoadingOptions.fast : ModelLoadingOptions.default
         let session = try await WhisperSession.fromPretrained(
             model: model,
+            options: loadingOptions,
             progressHandler: createProgressHandler()
         )
 
-        var options = TranscriptionOptions.default
-        options.language = language
+        if fast {
+            // Wait for background loading to complete
+            _ = try await session.waitUntilReady()
+        }
+
+        var transcriptionOptions = TranscriptionOptions.default
+        transcriptionOptions.language = language
 
         print("\nTranscribing...")
         print("─────────────────────────────────────────")
 
-        for try await result in session.transcribe(audio, sampleRate: AudioConstants.sampleRate, options: options) {
+        for try await result in session.transcribe(audio, sampleRate: AudioConstants.sampleRate, options: transcriptionOptions) {
             if result.isFinal {
                 print("\r\(result.text)")
             } else {
@@ -145,16 +155,24 @@ struct STTDemo {
         audio: MLXArray,
         model: WhisperModel,
         strategy: ChunkingStrategy,
-        language: String?
+        language: String?,
+        fast: Bool
     ) async throws {
+        let loadingOptions = fast ? ModelLoadingOptions.fast : ModelLoadingOptions.default
         let processor = try await LongAudioProcessor.create(
             model: model,
+            loadingOptions: loadingOptions,
             strategy: strategy.toLongAudioStrategy(),
             progressHandler: createProgressHandler()
         )
 
-        var options = TranscriptionOptions.default
-        options.language = language
+        if fast {
+            // Wait for background loading to complete
+            _ = try await processor.waitUntilReady()
+        }
+
+        var transcriptionOptions = TranscriptionOptions.default
+        transcriptionOptions.language = language
 
         print("\nTranscribing long audio...")
         print("─────────────────────────────────────────")
@@ -162,7 +180,7 @@ struct STTDemo {
         let stream: AsyncThrowingStream<TranscriptionProgress, Error> = processor.transcribe(
             audio,
             sampleRate: AudioConstants.sampleRate,
-            options: options
+            options: transcriptionOptions
         )
 
         for try await progress in stream {
@@ -259,6 +277,9 @@ struct STTDemo {
                 i += 1
                 config.language = args[i]
 
+            case "--fast", "-f":
+                config.fast = true
+
             default:
                 // Positional argument: treat first as audio path, second as model
                 if config.audioPath.isEmpty {
@@ -297,6 +318,7 @@ struct STTDemo {
         Options:
           --audio, -a <file>      Path to audio file
           --model, -m <model>     Model size: tiny, base, small, medium, largeV3, largeTurbo
+          --fast, -f              Use fast loading (int4 quantization + background init)
           --mode <mode>           Processing mode:
                                     short  - Use WhisperSession directly (for audio <30s)
                                     long   - Use LongAudioProcessor with chunking
@@ -312,6 +334,9 @@ struct STTDemo {
         Examples:
           # Short audio (uses WhisperSession directly)
           stt-demo test.wav
+
+          # Fast loading with int4 quantization (smaller model, faster load)
+          stt-demo test.wav --fast
 
           # Long audio with sliding window strategy
           stt-demo --audio long.wav --mode long --strategy sliding

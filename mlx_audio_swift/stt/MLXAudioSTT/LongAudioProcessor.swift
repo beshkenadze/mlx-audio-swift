@@ -77,6 +77,11 @@ public final class LongAudioProcessor: @unchecked Sendable {
         self.telemetry = telemetry
     }
 
+    /// Wait for the underlying session to be ready (for background loading)
+    public func waitUntilReady(timeout: Duration = .seconds(30)) async throws -> Bool {
+        try await session.waitUntilReady(timeout: timeout)
+    }
+
     // MARK: - Factory
 
     public static func create(
@@ -89,6 +94,34 @@ public final class LongAudioProcessor: @unchecked Sendable {
     ) async throws -> LongAudioProcessor {
         let session = try await WhisperSession.fromPretrained(
             model: model,
+            progressHandler: progressHandler
+        )
+
+        let chunkingStrategy = createStrategy(from: strategy)
+        let transcriber = WhisperSessionTranscriber(session: session)
+
+        return LongAudioProcessor(
+            session: session,
+            strategy: chunkingStrategy,
+            transcriber: transcriber,
+            mergeConfig: mergeConfig,
+            limits: limits,
+            telemetry: telemetry
+        )
+    }
+
+    public static func create(
+        model: WhisperModel = .largeTurbo,
+        loadingOptions: ModelLoadingOptions,
+        strategy: StrategyType = .auto,
+        mergeConfig: MergeConfig = .default,
+        limits: ProcessingLimits = .default,
+        telemetry: ChunkingTelemetry? = nil,
+        progressHandler: ((WhisperProgress) -> Void)? = nil
+    ) async throws -> LongAudioProcessor {
+        let session = try await WhisperSession.fromPretrained(
+            model: model,
+            options: loadingOptions,
             progressHandler: progressHandler
         )
 
