@@ -214,3 +214,56 @@ public struct TimestampDeduplicationStrategy: DeduplicationStrategy {
         )
     }
 }
+
+/// Composite deduplication strategy that selects the best approach based on available data
+/// Priority order:
+/// 1. TimestampDeduplicationStrategy if timestamps available AND overlapEnd configured
+/// 2. LevenshteinDeduplicationStrategy if previousEndWords available
+/// 3. NoOpDeduplicationStrategy otherwise
+public struct CompositeDeduplicationStrategy: DeduplicationStrategy {
+    public var name: String { "composite" }
+
+    private let overlapEnd: TimeInterval?
+    private let maxLookback: Int
+
+    public init(overlapEnd: TimeInterval? = nil, maxLookback: Int = 10) {
+        self.overlapEnd = overlapEnd
+        self.maxLookback = maxLookback
+    }
+
+    public func deduplicate(
+        currentText: String,
+        previousEndWords: [String],
+        currentWords: [WordTimestamp]?
+    ) -> DeduplicationResult {
+        // Priority 1: Use timestamps if available AND overlapEnd configured
+        if let overlapEnd = overlapEnd,
+           let words = currentWords,
+           !words.isEmpty {
+            let timestampStrategy = TimestampDeduplicationStrategy(overlapEnd: overlapEnd)
+            return timestampStrategy.deduplicate(
+                currentText: currentText,
+                previousEndWords: previousEndWords,
+                currentWords: words
+            )
+        }
+
+        // Priority 2: Use Levenshtein if previousEndWords available
+        if !previousEndWords.isEmpty {
+            let levenshteinStrategy = LevenshteinDeduplicationStrategy(maxLookback: maxLookback)
+            return levenshteinStrategy.deduplicate(
+                currentText: currentText,
+                previousEndWords: previousEndWords,
+                currentWords: nil
+            )
+        }
+
+        // Priority 3: No deduplication needed
+        let noopStrategy = NoOpDeduplicationStrategy()
+        return noopStrategy.deduplicate(
+            currentText: currentText,
+            previousEndWords: previousEndWords,
+            currentWords: currentWords
+        )
+    }
+}
