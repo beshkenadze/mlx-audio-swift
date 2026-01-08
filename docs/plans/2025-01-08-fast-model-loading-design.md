@@ -23,6 +23,20 @@ This design was reviewed by spec experts (Wiegers, Fowler, Nygard, Crispin) and 
 | No timeout for `waitUntilReady()` | Added configurable timeout with racing task pattern |
 | Missing hardware requirements | Added hardware matrix in Success Criteria |
 
+## Codex CLI Review Applied
+
+Additional issues found by Codex (gpt-5.2) review:
+
+| Issue | Severity | Fix Applied |
+|-------|----------|-------------|
+| API inconsistency: `fromPretrained` hides `didFallback` | High | Expose `actualQuantization` on `WhisperSession` |
+| `ManagedAtomic<LoadingState>` won't compile (Error not AtomicValue) | High | Use `OSAllocatedUnfairLock` for state management |
+| No cancellation if session dropped during background eval | Medium | Add `backgroundTask` handle + `deinit` cancellation |
+| Timeout race: may throw even if ready | Medium | Recheck state after timeout, return `.ready` if true |
+| Thread safety of parallel updates unverified | Medium | Document MLX-Swift assumption + add serial fallback option |
+| No tests for timeout/multi-waiter/fallback | Medium | Added comprehensive test cases |
+| Integration tests require network | Medium | Added `MockModelLoader` protocol for CI |
+
 ---
 
 ## Success Criteria
@@ -73,15 +87,46 @@ public enum WhisperQuantization: String, CaseIterable, Sendable {
 public struct ModelLoadingOptions: Sendable {
     public var quantization: WhisperQuantization
     public var loadInBackground: Bool  // Return immediately, eval in background
+    public var fallbackToFloat16: Bool  // If quantized unavailable, use float16
 
+    public init(
+        quantization: WhisperQuantization = .float16,
+        loadInBackground: Bool = false,
+        fallbackToFloat16: Bool = true
+    ) {
+        self.quantization = quantization
+        self.loadInBackground = loadInBackground
+        self.fallbackToFloat16 = fallbackToFloat16
+    }
+
+    // MARK: - Presets
+
+    /// Default: float16, blocking, with fallback
     public static let `default` = ModelLoadingOptions(
         quantization: .float16,
-        loadInBackground: false
+        loadInBackground: false,
+        fallbackToFloat16: true
     )
 
+    /// Fast: int4, background loading, with fallback
     public static let fast = ModelLoadingOptions(
         quantization: .int4,
-        loadInBackground: true
+        loadInBackground: true,
+        fallbackToFloat16: true
+    )
+
+    /// Fast but blocking: int4, wait for eval, with fallback
+    public static let fastBlocking = ModelLoadingOptions(
+        quantization: .int4,
+        loadInBackground: false,
+        fallbackToFloat16: true
+    )
+
+    /// Strict: int4, fail if unavailable (no fallback)
+    public static let strict = ModelLoadingOptions(
+        quantization: .int4,
+        loadInBackground: false,
+        fallbackToFloat16: false  // Throws if int4 unavailable
     )
 }
 ```
@@ -207,6 +252,41 @@ private static func loadWeightsParallel(
 
 **Expected Savings:** ~1-2s (parallel vs sequential param updates)
 
+### Thread Safety Considerations
+
+**Assumption:** MLX-Swift's `Module.update(parameters:)` is thread-safe when called on independent modules (encoder vs decoder). This is based on:
+- Encoder and decoder are separate `Module` instances with no shared mutable state
+- Each update operates on distinct parameter trees
+- MLX operations are dispatched to GPU which handles synchronization
+
+**If assumption is wrong:** Add serial fallback:
+
+```swift
+public struct ModelLoadingOptions: Sendable {
+    // ... existing properties
+    public var parallelWeightLoading: Bool  // Default true, set false if issues arise
+}
+
+private static func loadWeights(..., parallel: Bool) async throws {
+    if parallel {
+        // Parallel path (default)
+        try await loadWeightsParallel(...)
+    } else {
+        // Serial fallback
+        let encoderParams = ModuleParameters.unflattened(encoderWeights)
+        try encoder.update(parameters: encoderParams, verify: [.noUnusedKeys])
+
+        let decoderParams = ModuleParameters.unflattened(decoderWeights)
+        try decoder.update(parameters: decoderParams, verify: [.all])
+    }
+}
+```
+
+**Verification plan:**
+1. Run parallel loading 100x in test, check for crashes/corruption
+2. Compare transcription output between parallel and serial loading
+3. Monitor with Thread Sanitizer enabled
+
 ---
 
 ## Background Loading Pattern
@@ -214,6 +294,8 @@ private static func loadWeightsParallel(
 ### Loading State
 
 ```swift
+import os  // For OSAllocatedUnfairLock
+
 public final class WhisperSession: @unchecked Sendable {
 
     public enum LoadingState: Sendable {
@@ -222,56 +304,94 @@ public final class WhisperSession: @unchecked Sendable {
         case failed(Error)
     }
 
-    private let _state = ManagedAtomic<LoadingState>(.loading)
+    // MARK: - Thread-Safe State (OSAllocatedUnfairLock instead of ManagedAtomic)
+    // Note: ManagedAtomic<LoadingState> won't compile because Error isn't AtomicValue
+    private let _state = OSAllocatedUnfairLock(initialState: LoadingState.loading)
 
     /// Stream and continuation for signaling background load completion
     private let readyStream: AsyncStream<Void>
     private let readyContinuation: AsyncStream<Void>.Continuation
 
-    public var state: LoadingState { _state.load(ordering: .acquiring) }
+    /// Handle to background eval task for cancellation on deinit
+    private var backgroundTask: Task<Void, Never>?
+
+    /// The quantization that was actually loaded (may differ from requested if fallback occurred)
+    public let actualQuantization: WhisperQuantization
+
+    /// True if a fallback occurred during loading
+    public let didFallback: Bool
+
+    public var state: LoadingState { _state.withLock { $0 } }
     public var isReady: Bool {
         if case .ready = state { return true }
         return false
     }
 
-    internal init(loaded: LoadedModel) {
+    internal init(loadResult: LoadResult) {
+        // Store fallback information for caller visibility
+        self.actualQuantization = loadResult.actualQuantization
+        self.didFallback = loadResult.didFallback
+
         // Create stream/continuation pair for background loading coordination
         var continuation: AsyncStream<Void>.Continuation!
         self.readyStream = AsyncStream { continuation = $0 }
         self.readyContinuation = continuation
 
-        // ... store loaded model components
+        // ... store loaded model components from loadResult.model
+    }
+
+    deinit {
+        // Cancel background eval if session is dropped before completion
+        backgroundTask?.cancel()
     }
 
     /// Wait until model is fully loaded and evaluated
     /// - Parameter timeout: Maximum time to wait (default 30s)
-    /// - Throws: WhisperError.loadingFailed if background eval fails, or timeout error
-    public func waitUntilReady(timeout: Duration = .seconds(30)) async throws {
+    /// - Returns: true if ready, false if timed out (but may become ready later)
+    /// - Throws: WhisperError.loadingFailed if background eval fails
+    public func waitUntilReady(timeout: Duration = .seconds(30)) async throws -> Bool {
+        // Fast path: already terminal state
         switch state {
-        case .ready: return
+        case .ready: return true
+        case .failed(let error): throw error
+        case .loading: break
+        }
+
+        // Wait for background eval with timeout
+        let didComplete = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in self.readyStream { break }
+                return true  // Stream completed
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false  // Timeout
+            }
+            // First task to complete wins
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+
+        // IMPORTANT: Recheck state after wait (fixes timeout race condition)
+        // Even if timeout won, state may have transitioned to .ready
+        switch state {
+        case .ready: return true
         case .failed(let error): throw error
         case .loading:
-            // Wait for background eval with timeout
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    for await _ in self.readyStream { break }
-                }
-                group.addTask {
-                    try await Task.sleep(for: timeout)
-                    throw WhisperError.loadingTimeout
-                }
-                // First task to complete wins
-                try await group.next()
-                group.cancelAll()
-            }
-            // Re-check state after stream yields
-            if case .failed(let error) = state {
-                throw error
-            }
+            // Only return false (timeout) if still loading
+            return didComplete
         }
     }
 }
 ```
+
+**Key Changes from Codex Review:**
+- `OSAllocatedUnfairLock` instead of `ManagedAtomic` (Error isn't AtomicValue-conformant)
+- `actualQuantization` and `didFallback` exposed on session (API consistency)
+- `backgroundTask` stored for cancellation in `deinit`
+- `waitUntilReady` returns `Bool` instead of throwing on timeout (cleaner semantics)
+- State recheck after timeout (fixes race condition)
 
 ### Updated Load Flow
 
@@ -281,34 +401,49 @@ public static func fromPretrained(
     options: ModelLoadingOptions = .default
 ) async throws -> WhisperSession {
 
-    let loaded = try await WhisperModelLoader.load(
+    let loadResult = try await WhisperModelLoader.load(
         model: model,
-        quantization: options.quantization
+        quantization: options.quantization,
+        fallbackToFloat16: options.fallbackToFloat16  // New option
     )
 
-    let session = WhisperSession(loaded: loaded)
+    let session = WhisperSession(loadResult: loadResult)
 
     if options.loadInBackground {
-        // Return immediately, eval in background with error handling
-        Task.detached {
+        // Store task handle for cancellation in deinit
+        session.backgroundTask = Task.detached { [weak session] in
+            guard let session = session else { return }  // Session dropped, skip eval
+
             do {
-                eval(loaded.encoder, loaded.decoder)
-                session._state.store(.ready, ordering: .releasing)
+                // Check for cancellation before expensive eval
+                try Task.checkCancellation()
+                eval(loadResult.model.encoder, loadResult.model.decoder)
+                session._state.withLock { $0 = .ready }
+            } catch is CancellationError {
+                // Session was dropped, don't update state
+                return
             } catch {
-                session._state.store(.failed(error), ordering: .releasing)
+                session._state.withLock { $0 = .failed(error) }
             }
             // Always signal completion (success or failure)
             session.readyContinuation.finish()
         }
     } else {
         // Blocking eval (current behavior)
-        eval(loaded.encoder, loaded.decoder)
-        session._state.store(.ready, ordering: .releasing)
+        eval(loadResult.model.encoder, loadResult.model.decoder)
+        session._state.withLock { $0 = .ready }
     }
 
     return session
 }
 ```
+
+**Key Changes:**
+- Uses `LoadResult` to pass fallback info to session
+- Stores `backgroundTask` for cancellation
+- Uses `[weak session]` to avoid retain cycle
+- Checks `Task.checkCancellation()` before expensive eval
+- Uses `withLock` instead of atomic store
 
 ### Usage
 
@@ -430,6 +565,61 @@ public func transcribe(_ audio: MLXArray) async throws -> TranscriptionResult {
 
 ## Testing Strategy
 
+### Mock Loader Protocol (CI-Safe)
+
+```swift
+/// Protocol for model loading - allows mocking in CI without network
+public protocol ModelLoaderProtocol: Sendable {
+    func load(
+        model: WhisperModel,
+        quantization: WhisperQuantization,
+        fallbackToFloat16: Bool
+    ) async throws -> LoadResult
+}
+
+/// Real implementation using HuggingFace
+public struct HuggingFaceModelLoader: ModelLoaderProtocol {
+    public func load(...) async throws -> LoadResult {
+        // Real HF download logic
+    }
+}
+
+/// Mock for unit tests (no network required)
+public struct MockModelLoader: ModelLoaderProtocol {
+    public var shouldFail: Bool = false
+    public var simulatedDelay: Duration = .zero
+    public var forceFallback: Bool = false
+
+    public func load(
+        model: WhisperModel,
+        quantization: WhisperQuantization,
+        fallbackToFloat16: Bool
+    ) async throws -> LoadResult {
+        if simulatedDelay > .zero {
+            try await Task.sleep(for: simulatedDelay)
+        }
+
+        if shouldFail {
+            throw WhisperError.quantizedModelNotAvailable(model, quantization)
+        }
+
+        let actualQuant = forceFallback ? .float16 : quantization
+        return LoadResult(
+            model: MockLoadedModel(),
+            requestedQuantization: quantization,
+            actualQuantization: actualQuant
+        )
+    }
+}
+
+// Inject loader via environment or init
+public static func fromPretrained(
+    _ model: WhisperModel,
+    options: ModelLoadingOptions = .default,
+    loader: ModelLoaderProtocol = HuggingFaceModelLoader()
+) async throws -> WhisperSession
+```
+
 ### Unit Tests
 
 ```swift
@@ -466,12 +656,19 @@ final class WhisperQuantizationTests: XCTestCase {
         let opts = ModelLoadingOptions.default
         XCTAssertEqual(opts.quantization, .float16)
         XCTAssertFalse(opts.loadInBackground)
+        XCTAssertTrue(opts.fallbackToFloat16)
     }
 
     func testFastOptions() {
         let opts = ModelLoadingOptions.fast
         XCTAssertEqual(opts.quantization, .int4)
         XCTAssertTrue(opts.loadInBackground)
+    }
+
+    func testStrictOptions() {
+        let opts = ModelLoadingOptions.strict
+        XCTAssertEqual(opts.quantization, .int4)
+        XCTAssertFalse(opts.fallbackToFloat16)  // Will throw if unavailable
     }
 }
 ```
@@ -516,25 +713,121 @@ final class WhisperLoadingIntegrationTests: XCTestCase {
     }
 
     func testBackgroundLoadingFailure() async throws {
-        // Verify error propagation from background eval
-        // (Use invalid model path to trigger failure)
+        let mockLoader = MockModelLoader(shouldFail: true)
         let session = try await WhisperSession.fromPretrained(
             .tiny,
-            options: ModelLoadingOptions(quantization: .int4, loadInBackground: true)
+            options: .fast,
+            loader: mockLoader
         )
 
-        // waitUntilReady should throw if background eval failed
+        // waitUntilReady should throw the underlying error
         do {
-            try await session.waitUntilReady(timeout: .seconds(5))
-            // If we get here with a failed state, test should fail
-            if case .failed = session.state {
-                XCTFail("waitUntilReady should throw on failed state")
-            }
-        } catch WhisperError.loadingTimeout {
-            // Timeout is acceptable for this test
-        } catch {
-            // Other errors indicate proper error propagation
+            _ = try await session.waitUntilReady(timeout: .seconds(5))
+            XCTFail("Should have thrown")
+        } catch WhisperError.quantizedModelNotAvailable {
+            // Expected
         }
+    }
+
+    // MARK: - Timeout Tests
+
+    func testWaitUntilReadyTimeout() async throws {
+        let mockLoader = MockModelLoader(simulatedDelay: .seconds(10))
+        let session = try await WhisperSession.fromPretrained(
+            .tiny,
+            options: .fast,
+            loader: mockLoader
+        )
+
+        let ready = try await session.waitUntilReady(timeout: .milliseconds(100))
+        XCTAssertFalse(ready, "Should timeout and return false")
+        XCTAssertFalse(session.isReady, "Should still be loading")
+    }
+
+    func testTimeoutThenEventualSuccess() async throws {
+        let mockLoader = MockModelLoader(simulatedDelay: .milliseconds(200))
+        let session = try await WhisperSession.fromPretrained(
+            .tiny,
+            options: .fast,
+            loader: mockLoader
+        )
+
+        // First wait times out
+        let ready1 = try await session.waitUntilReady(timeout: .milliseconds(50))
+        XCTAssertFalse(ready1)
+
+        // Wait longer, should eventually succeed
+        let ready2 = try await session.waitUntilReady(timeout: .seconds(1))
+        XCTAssertTrue(ready2)
+        XCTAssertTrue(session.isReady)
+    }
+
+    // MARK: - Multi-Waiter Tests
+
+    func testMultipleWaiters() async throws {
+        let mockLoader = MockModelLoader(simulatedDelay: .milliseconds(100))
+        let session = try await WhisperSession.fromPretrained(
+            .tiny,
+            options: .fast,
+            loader: mockLoader
+        )
+
+        // Multiple concurrent waiters
+        async let ready1 = session.waitUntilReady(timeout: .seconds(5))
+        async let ready2 = session.waitUntilReady(timeout: .seconds(5))
+        async let ready3 = session.waitUntilReady(timeout: .seconds(5))
+
+        let results = try await [ready1, ready2, ready3]
+        XCTAssertTrue(results.allSatisfy { $0 }, "All waiters should see ready")
+    }
+
+    // MARK: - Fallback Tests
+
+    func testFallbackExposedOnSession() async throws {
+        let mockLoader = MockModelLoader(forceFallback: true)
+        let session = try await WhisperSession.fromPretrained(
+            .tiny,
+            options: ModelLoadingOptions(quantization: .int4, loadInBackground: false),
+            loader: mockLoader
+        )
+
+        XCTAssertTrue(session.didFallback)
+        XCTAssertEqual(session.actualQuantization, .float16)
+    }
+
+    func testStrictModeNoFallback() async throws {
+        let mockLoader = MockModelLoader(forceFallback: true)
+
+        do {
+            _ = try await WhisperSession.fromPretrained(
+                .tiny,
+                options: .strict,  // fallbackToFloat16 = false
+                loader: mockLoader
+            )
+            XCTFail("Should throw when quantized unavailable and strict mode")
+        } catch WhisperError.quantizedModelNotAvailable {
+            // Expected
+        }
+    }
+
+    // MARK: - Cancellation Tests
+
+    func testSessionDropCancelsBackgroundEval() async throws {
+        let mockLoader = MockModelLoader(simulatedDelay: .seconds(10))
+
+        var session: WhisperSession? = try await WhisperSession.fromPretrained(
+            .tiny,
+            options: .fast,
+            loader: mockLoader
+        )
+
+        // Drop session while background eval is running
+        session = nil
+
+        // Give cancellation time to propagate
+        try await Task.sleep(for: .milliseconds(50))
+
+        // No crash, no leak - test passes if we get here
     }
 
     // MARK: - Helper
