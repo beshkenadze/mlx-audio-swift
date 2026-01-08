@@ -13,6 +13,10 @@ public enum WhisperError: LocalizedError, Sendable {
     case timeout(TimeInterval)
     case tokenizerLoadFailed(String)
     case insufficientMemory(required: Int, available: Int)
+    case quantizedModelNotAvailable(WhisperModel, WhisperQuantization)
+    case modelNotReady
+    case loadingFailed(underlying: Error)
+    case loadingTimeout
 
     public var errorDescription: String? {
         switch self {
@@ -40,6 +44,14 @@ public enum WhisperError: LocalizedError, Sendable {
             return "Failed to load tokenizer: \(reason)"
         case .insufficientMemory(let required, let available):
             return "Insufficient GPU memory. Required: \(required) MB, Available: \(available) MB"
+        case .quantizedModelNotAvailable(let model, let quant):
+            return "Quantized model \(model) with \(quant) not available on HuggingFace"
+        case .modelNotReady:
+            return "Model not ready. Call waitUntilReady() first"
+        case .loadingFailed(let error):
+            return "Model loading failed: \(error.localizedDescription)"
+        case .loadingTimeout:
+            return "Model loading timed out"
         }
     }
 
@@ -57,6 +69,14 @@ public enum WhisperError: LocalizedError, Sendable {
             return "Try smaller audio chunks or increase timeout"
         case .insufficientMemory:
             return "Use a smaller model (tiny/base) or free GPU memory"
+        case .quantizedModelNotAvailable:
+            return "Try a different quantization level or use float16"
+        case .modelNotReady:
+            return "Call await session.waitUntilReady() before transcribing"
+        case .loadingFailed:
+            return "Check network connection and try again"
+        case .loadingTimeout:
+            return "Increase timeout or check system resources"
         default:
             return nil
         }

@@ -1,7 +1,17 @@
 import Foundation
 import MLX
+import os
 
 public final class WhisperSession: @unchecked Sendable {
+    /// Loading state for background model initialization
+    /// Note: @unchecked Sendable because Error is not Sendable, but we ensure thread-safe access via OSAllocatedUnfairLock
+    public enum LoadingState: @unchecked Sendable {
+        case loading
+        case ready
+        case failed(Error)
+        case cancelled
+    }
+
     private let modelType: WhisperModel
     private let streamingConfig: StreamingConfig
     private var currentTask: Task<Void, Never>?
@@ -13,13 +23,29 @@ public final class WhisperSession: @unchecked Sendable {
     private let config: WhisperConfiguration
     private let alignmentHeads: [(layer: Int, head: Int)]
 
+    private let _state = OSAllocatedUnfairLock(initialState: LoadingState.loading)
+    private let readyStream: AsyncStream<Void>
+    private let readyContinuation: AsyncStream<Void>.Continuation
+    private var backgroundTask: Task<Void, Never>?
+
+    public let actualQuantization: WhisperQuantization
+    public let didFallback: Bool
+
+    public var state: LoadingState { _state.withLock { $0 } }
+    public var isReady: Bool {
+        if case .ready = state { return true }
+        return false
+    }
+
     private init(
         modelType: WhisperModel,
         streamingConfig: StreamingConfig,
         encoder: AudioEncoder,
         decoder: TextDecoder,
         tokenizer: WhisperTokenizer,
-        config: WhisperConfiguration
+        config: WhisperConfiguration,
+        actualQuantization: WhisperQuantization,
+        didFallback: Bool
     ) {
         self.modelType = modelType
         self.streamingConfig = streamingConfig
@@ -28,6 +54,48 @@ public final class WhisperSession: @unchecked Sendable {
         self.tokenizer = tokenizer
         self.config = config
         self.alignmentHeads = WhisperAlignmentHeads.heads(for: modelType)
+        self.actualQuantization = actualQuantization
+        self.didFallback = didFallback
+
+        var continuation: AsyncStream<Void>.Continuation!
+        self.readyStream = AsyncStream { continuation = $0 }
+        self.readyContinuation = continuation
+    }
+
+    deinit {
+        backgroundTask?.cancel()
+    }
+
+    public func waitUntilReady(timeout: Duration = .seconds(30)) async throws -> Bool {
+        try Task.checkCancellation()
+
+        switch state {
+        case .ready: return true
+        case .failed(let error): throw error
+        case .cancelled: throw WhisperError.cancelled
+        case .loading: break
+        }
+
+        let didComplete = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in self.readyStream { break }
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+
+        switch state {
+        case .ready: return true
+        case .failed(let error): throw error
+        case .cancelled: throw WhisperError.cancelled
+        case .loading: return didComplete
+        }
     }
 
     // MARK: - Factory
@@ -49,19 +117,80 @@ public final class WhisperSession: @unchecked Sendable {
 
         progressHandler?(.loading(0.9))
 
-        // Load tokenizer from cached directory (downloaded alongside model weights)
         let tokenizer = try await WhisperTokenizer(modelFolder: loaded.tokenizerDirectory)
 
         progressHandler?(.loading(1.0))
 
-        return WhisperSession(
+        let session = WhisperSession(
             modelType: model,
             streamingConfig: streaming,
             encoder: loaded.encoder,
             decoder: loaded.decoder,
             tokenizer: tokenizer,
-            config: loaded.config
+            config: loaded.config,
+            actualQuantization: .float16,
+            didFallback: false
         )
+        session._state.withLock { $0 = .ready }
+        return session
+    }
+
+    public static func fromPretrained(
+        model: WhisperModel = .largeTurbo,
+        options: ModelLoadingOptions,
+        streaming: StreamingConfig = .default,
+        progressHandler: ((WhisperProgress) -> Void)? = nil
+    ) async throws -> WhisperSession {
+        progressHandler?(.downloading(0))
+
+        let loadResult = try await WhisperModelLoader.load(
+            model: model,
+            quantization: options.quantization,
+            fallbackToFloat16: options.fallbackToFloat16,
+            progressHandler: { progress in
+                let fraction = Float(progress.fractionCompleted)
+                progressHandler?(.downloading(fraction * 0.8))
+            }
+        )
+
+        progressHandler?(.loading(0.9))
+
+        let tokenizer = try await WhisperTokenizer(modelFolder: loadResult.model.tokenizerDirectory)
+
+        progressHandler?(.loading(1.0))
+
+        let session = WhisperSession(
+            modelType: model,
+            streamingConfig: streaming,
+            encoder: loadResult.model.encoder,
+            decoder: loadResult.model.decoder,
+            tokenizer: tokenizer,
+            config: loadResult.model.config,
+            actualQuantization: loadResult.actualQuantization,
+            didFallback: loadResult.didFallback
+        )
+
+        if options.loadInBackground {
+            session.backgroundTask = Task.detached { [weak session] in
+                guard let session = session else { return }
+                do {
+                    try Task.checkCancellation()
+                    eval(loadResult.model.encoder, loadResult.model.decoder)
+                    session._state.withLock { $0 = .ready }
+                } catch is CancellationError {
+                    session._state.withLock { $0 = .cancelled }
+                } catch {
+                    session._state.withLock { $0 = .failed(error) }
+                }
+                session.readyContinuation.finish()
+            }
+        } else {
+            eval(loadResult.model.encoder, loadResult.model.decoder)
+            session._state.withLock { $0 = .ready }
+            session.readyContinuation.finish()
+        }
+
+        return session
     }
 
     // MARK: - Transcription (Streaming)

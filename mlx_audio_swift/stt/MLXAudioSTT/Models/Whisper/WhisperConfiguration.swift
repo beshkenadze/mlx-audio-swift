@@ -177,3 +177,10 @@ extension WhisperConfiguration {
         ]
     )
 }
+
+/// Quantization level for model weights
+public enum WhisperQuantization: String, CaseIterable, Sendable {
+    case float16      // Default, highest quality
+    case int8         // 8-bit, 2x smaller
+    case int4         // 4-bit, 4x smaller, recommended
+}
