@@ -87,7 +87,7 @@ struct MultiHeadAttentionTests {
     }
 
     @Test func kvCacheUpdateAppends() throws {
-        let cache = KVCache()
+        let cache = KVCache(dim: 512)
 
         let keys1 = MLXArray.ones([1, 2, 512])
         let values1 = MLXArray.ones([1, 2, 512])
@@ -105,7 +105,7 @@ struct MultiHeadAttentionTests {
     }
 
     @Test func kvCacheReset() throws {
-        let cache = KVCache()
+        let cache = KVCache(dim: 512)
 
         let keys = MLXArray.ones([1, 2, 512])
         let values = MLXArray.ones([1, 2, 512])

@@ -73,7 +73,7 @@ struct TextDecoderTests {
         let encoderOutput = MLXArray.zeros([1, 1500, 1280])
 
         // Create KV cache for incremental decoding
-        let kvCache = (0..<config.nTextLayer).map { _ in KVCache() }
+        let kvCache = (0..<config.nTextLayer).map { _ in KVCache(dim: config.nTextState) }
 
         // First token
         let token1 = MLXArray([50258], [1, 1])
