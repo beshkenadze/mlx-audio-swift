@@ -183,9 +183,37 @@ public final class LongAudioProcessor: @unchecked Sendable {
             return SequentialChunkingStrategy(config: config)
         case .slidingWindow(let config):
             return SlidingWindowChunkingStrategy(config: config)
-        case .vad:
-            // VAD strategy not yet fully implemented - fallback to sliding window
-            return SlidingWindowChunkingStrategy()
+        case .vad(let vadConfig, let providerType):
+            let provider: VADProvider = switch providerType {
+            case .energy:
+                EnergyVADProvider(
+                    config: EnergyVADProvider.EnergyVADConfig(
+                        speechThreshold: vadConfig.speechThreshold > 0.1 ? 0.02 : 0.01
+                    ),
+                    segmentConfig: VADSegmentConfig(
+                        minSpeechDuration: vadConfig.minSpeechDuration,
+                        maxSegmentDuration: vadConfig.maxSegmentDuration
+                    )
+                )
+            case .sileroMLX:
+                SileroVADProvider(
+                    config: SileroVADProvider.SileroVADConfig(
+                        threshold: vadConfig.speechThreshold,
+                        minSpeechDurationMs: Int(vadConfig.minSpeechDuration * 1000)
+                    ),
+                    segmentConfig: VADSegmentConfig(
+                        minSpeechDuration: vadConfig.minSpeechDuration,
+                        maxSegmentDuration: vadConfig.maxSegmentDuration
+                    )
+                )
+            }
+            return VADChunkingStrategy(
+                vadProvider: provider,
+                config: VADChunkingStrategy.VADConfig(
+                    maxChunkDuration: vadConfig.maxSegmentDuration,
+                    minSpeechDuration: vadConfig.minSpeechDuration
+                )
+            )
         }
     }
 
