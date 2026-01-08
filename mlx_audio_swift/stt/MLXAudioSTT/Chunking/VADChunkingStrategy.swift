@@ -3,6 +3,10 @@ import MLX
 
 /// VAD-based chunking with parallel transcription
 /// Best for noisy audio, fastest with batching
+///
+/// Note: VAD produces non-overlapping chunks based on speech boundaries,
+/// so deduplication is typically not needed. Use NoOpDeduplicationStrategy
+/// or disable deduplication when using this strategy.
 public final class VADChunkingStrategy: ChunkingStrategy, Sendable {
     public let name = "vad"
     public let transcriptionMode = TranscriptionMode.independent
