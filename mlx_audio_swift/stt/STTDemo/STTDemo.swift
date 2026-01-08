@@ -186,6 +186,8 @@ struct STTDemo {
             options: transcriptionOptions
         )
 
+        var lastPrintedLineCount = 0
+
         for try await progress in stream {
             let percent = Int(progress.progress * 100)
             let chunkInfo = "[\(progress.chunkIndex + 1)/\(progress.totalChunks)]"
@@ -202,13 +204,25 @@ struct STTDemo {
                     print(progress.text)
                 }
             } else if verbose {
+                // SDK now handles overlap deduplication via MergeConfig.deduplicateOverlap
+                let displayText = progress.chunkText
+
                 if progress.isPartial {
-                    // AlignAtt streaming: show word-by-word updates within a chunk
-                    print("\r\u{1B}[K\u{1B}[90m[\(progress.chunkIndex + 1)]\u{1B}[0m \(progress.chunkText)", terminator: "")
+                    // Clear previous multi-line output before printing new
+                    clearLines(lastPrintedLineCount)
+
+                    let prefix = "\u{1B}[90m[\(progress.chunkIndex + 1)]\u{1B}[0m "
+                    let output = prefix + displayText
+                    print(output, terminator: "")
                     fflush(stdout)
+
+                    // Estimate lines used (rough: assume 80 char terminal width)
+                    lastPrintedLineCount = max(1, (output.count + 79) / 80)
                 } else {
-                    // Chunk completed
-                    print("\r\u{1B}[K\u{1B}[90m[\(progress.chunkIndex + 1)]\u{1B}[0m \(progress.chunkText)")
+                    // Chunk completed - print final text with newline
+                    clearLines(lastPrintedLineCount)
+                    print("\u{1B}[90m[\(progress.chunkIndex + 1)]\u{1B}[0m \(displayText)")
+                    lastPrintedLineCount = 0
                 }
             } else {
                 print("\rProgress: \(percent)% \(chunkInfo) \(timeInfo)", terminator: "")
@@ -447,6 +461,15 @@ struct STTDemo {
         }
 
         return MLXArray(resampled)
+    }
+
+    /// Clear N lines above cursor for multi-line streaming updates
+    static func clearLines(_ count: Int) {
+        guard count > 0 else { return }
+        for _ in 0..<count {
+            print("\u{1B}[A\u{1B}[2K", terminator: "")
+        }
+        print("\r", terminator: "")
     }
 }
 

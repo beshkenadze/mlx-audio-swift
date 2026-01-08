@@ -31,7 +31,10 @@ public final class LongAudioProcessor: @unchecked Sendable {
             self.normalizeText = normalizeText
         }
 
-        public static let `default` = MergeConfig()
+        public static let `default` = MergeConfig(
+            deduplicateOverlap: true,
+            deduplicationStrategy: CompositeDeduplicationStrategy()
+        )
 
         /// Create config with smart deduplication using composite strategy
         public static func withSmartDeduplication(overlapEnd: TimeInterval? = nil) -> MergeConfig {
@@ -110,12 +113,13 @@ public final class LongAudioProcessor: @unchecked Sendable {
 
         let chunkingStrategy = createStrategy(from: strategy)
         let transcriber = WhisperSessionTranscriber(session: session)
+        let effectiveConfig = effectiveMergeConfig(mergeConfig, for: strategy)
 
         return LongAudioProcessor(
             session: session,
             strategy: chunkingStrategy,
             transcriber: transcriber,
-            mergeConfig: mergeConfig,
+            mergeConfig: effectiveConfig,
             limits: limits,
             telemetry: telemetry
         )
@@ -138,12 +142,13 @@ public final class LongAudioProcessor: @unchecked Sendable {
 
         let chunkingStrategy = createStrategy(from: strategy)
         let transcriber = WhisperSessionTranscriber(session: session)
+        let effectiveConfig = effectiveMergeConfig(mergeConfig, for: strategy)
 
         return LongAudioProcessor(
             session: session,
             strategy: chunkingStrategy,
             transcriber: transcriber,
-            mergeConfig: mergeConfig,
+            mergeConfig: effectiveConfig,
             limits: limits,
             telemetry: telemetry
         )
@@ -158,12 +163,13 @@ public final class LongAudioProcessor: @unchecked Sendable {
     ) -> LongAudioProcessor {
         let chunkingStrategy = createStrategy(from: strategy)
         let transcriber = WhisperSessionTranscriber(session: session)
+        let effectiveConfig = effectiveMergeConfig(mergeConfig, for: strategy)
 
         return LongAudioProcessor(
             session: session,
             strategy: chunkingStrategy,
             transcriber: transcriber,
-            mergeConfig: mergeConfig,
+            mergeConfig: effectiveConfig,
             limits: limits,
             telemetry: telemetry
         )
@@ -181,6 +187,34 @@ public final class LongAudioProcessor: @unchecked Sendable {
             // VAD strategy not yet fully implemented - fallback to sliding window
             return SlidingWindowChunkingStrategy()
         }
+    }
+
+    private static func effectiveMergeConfig(
+        _ mergeConfig: MergeConfig,
+        for strategyType: StrategyType
+    ) -> MergeConfig {
+        // If user explicitly set a deduplication strategy, use it
+        // Note: MergeConfig.default now uses CompositeDeduplicationStrategy()
+        // We enhance it with the proper overlapEnd from sliding window config
+        var config = mergeConfig
+
+        switch strategyType {
+        case .auto:
+            // Auto uses sliding window with default config (hopDuration = 25.0)
+            let swConfig = SlidingWindowChunkingStrategy.SlidingWindowConfig.default
+            config.deduplicationStrategy = swConfig.deduplicationStrategy
+        case .slidingWindow(let swConfig):
+            // Use the deduplication strategy configured in sliding window
+            config.deduplicationStrategy = swConfig.deduplicationStrategy
+        case .sequential:
+            // Sequential doesn't overlap, use Levenshtein for safety
+            config.deduplicationStrategy = LevenshteinDeduplicationStrategy()
+        case .vad:
+            // VAD produces non-overlapping chunks, minimal deduplication needed
+            config.deduplicationStrategy = NoOpDeduplicationStrategy()
+        }
+
+        return config
     }
 
     // MARK: - Streaming Transcription

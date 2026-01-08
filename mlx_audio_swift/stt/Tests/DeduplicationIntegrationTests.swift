@@ -69,12 +69,13 @@ struct DeduplicationIntegrationTests {
         #expect(config.deduplicationStrategy?.name == "composite")
     }
 
-    @Test("Default MergeConfig has no deduplication strategy")
-    func testDefaultMergeConfigNoStrategy() throws {
+    @Test("Default MergeConfig has composite deduplication strategy")
+    func testDefaultMergeConfigHasCompositeStrategy() throws {
         let config = LongAudioProcessor.MergeConfig.default
 
         #expect(config.deduplicateOverlap == true)
-        #expect(config.deduplicationStrategy == nil)
+        #expect(config.deduplicationStrategy != nil)
+        #expect(config.deduplicationStrategy?.name == "composite")
     }
 
     @Test("Custom deduplication strategy can be set on MergeConfig")
