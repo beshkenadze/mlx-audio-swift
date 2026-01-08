@@ -297,6 +297,9 @@ struct STTDemo {
             case "--fast", "-f":
                 config.fast = true
 
+            case "--verbose", "-v":
+                config.verbose = true
+
             default:
                 // Positional argument: treat first as audio path, second as model
                 if config.audioPath.isEmpty {
@@ -336,6 +339,7 @@ struct STTDemo {
           --audio, -a <file>      Path to audio file
           --model, -m <model>     Model size: tiny, base, small, medium, largeV3, largeTurbo
           --fast, -f              Use fast loading (int4 quantization + background init)
+          --verbose, -v           Show streaming text output (word-by-word for long audio)
           --mode <mode>           Processing mode:
                                     short  - Use WhisperSession directly (for audio <30s)
                                     long   - Use LongAudioProcessor with chunking
