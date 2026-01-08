@@ -15,20 +15,31 @@ public final class LongAudioProcessor: @unchecked Sendable {
 
     public struct MergeConfig: Sendable {
         public var deduplicateOverlap: Bool
+        public var deduplicationStrategy: (any DeduplicationStrategy)?
         public var minWordConfidence: Float
         public var normalizeText: Bool
 
         public init(
             deduplicateOverlap: Bool = true,
+            deduplicationStrategy: (any DeduplicationStrategy)? = nil,
             minWordConfidence: Float = 0.3,
             normalizeText: Bool = true
         ) {
             self.deduplicateOverlap = deduplicateOverlap
+            self.deduplicationStrategy = deduplicationStrategy
             self.minWordConfidence = minWordConfidence
             self.normalizeText = normalizeText
         }
 
         public static let `default` = MergeConfig()
+
+        /// Create config with smart deduplication using composite strategy
+        public static func withSmartDeduplication(overlapEnd: TimeInterval? = nil) -> MergeConfig {
+            MergeConfig(
+                deduplicateOverlap: true,
+                deduplicationStrategy: CompositeDeduplicationStrategy(overlapEnd: overlapEnd)
+            )
+        }
     }
 
     public enum StrategyType: Sendable {
@@ -228,6 +239,7 @@ public final class LongAudioProcessor: @unchecked Sendable {
         var accumulatedWords: [WordTimestamp] = []
         var currentChunkIndex = 0
         var totalChunks = estimateTotalChunks(audioDuration: audioDuration)
+        var previousChunkEndWords: [String] = []
 
         let streamingChunkStream = strategy.processStreaming(
             audio: audio,
@@ -273,17 +285,38 @@ public final class LongAudioProcessor: @unchecked Sendable {
 
                 continuation.yield(progress)
             } else {
-                if !processedText.isEmpty {
+                var textToAccumulate = processedText
+
+                if mergeConfig.deduplicateOverlap {
+                    if let strategy = mergeConfig.deduplicationStrategy {
+                        let result = strategy.deduplicate(
+                            currentText: processedText,
+                            previousEndWords: previousChunkEndWords,
+                            currentWords: nil
+                        )
+                        textToAccumulate = result.text
+                    } else if !previousChunkEndWords.isEmpty {
+                        textToAccumulate = deduplicateOverlapText(
+                            processedText,
+                            previousEndWords: previousChunkEndWords
+                        )
+                    }
+                }
+
+                if !textToAccumulate.isEmpty {
                     if !accumulatedText.isEmpty {
                         accumulatedText += " "
                     }
-                    accumulatedText += processedText
+                    accumulatedText += textToAccumulate
                 }
+
+                let words = processedText.split(separator: " ").map(String.init)
+                previousChunkEndWords = Array(words.suffix(10))
                 currentChunkText = ""
 
                 let progress = TranscriptionProgress(
                     text: accumulatedText,
-                    chunkText: processedText,
+                    chunkText: textToAccumulate,
                     words: accumulatedWords.isEmpty ? nil : accumulatedWords,
                     isFinal: false,
                     isPartial: false,
@@ -374,6 +407,26 @@ public final class LongAudioProcessor: @unchecked Sendable {
             word.start >= lastExisting.end ||
             word.confidence >= mergeConfig.minWordConfidence
         }
+    }
+
+    private func deduplicateOverlapText(_ text: String, previousEndWords: [String]) -> String {
+        let words = text.split(separator: " ").map(String.init)
+        guard !words.isEmpty else { return text }
+
+        var matchLength = 0
+        for len in 1...min(previousEndWords.count, words.count) {
+            let prevSuffix = previousEndWords.suffix(len)
+            let currPrefix = words.prefix(len)
+
+            if prevSuffix.elementsEqual(currPrefix, by: { $0.lowercased() == $1.lowercased() }) {
+                matchLength = len
+            }
+        }
+
+        if matchLength > 0 {
+            return words.dropFirst(matchLength).joined(separator: " ")
+        }
+        return text
     }
 }
 
