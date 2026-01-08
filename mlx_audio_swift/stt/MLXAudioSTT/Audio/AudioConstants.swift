@@ -6,11 +6,8 @@ public enum AudioConstants {
     /// Sample rate in Hz (Whisper expects 16kHz mono audio)
     public static let sampleRate: Int = 16000
 
-    /// FFT window size for mel spectrogram (must be power of 2 for vDSP)
-    public static let nFFT: Int = 512
-
-    /// Original Whisper window size (used for Hann window)
-    public static let whisperWindowSize: Int = 400
+    /// FFT window size for mel spectrogram (matches Whisper's N_FFT=400)
+    public static let nFFT: Int = 400
 
     /// Hop length between frames (whisperWindowSize / 2.5 = 160)
     public static let hopLength: Int = 160

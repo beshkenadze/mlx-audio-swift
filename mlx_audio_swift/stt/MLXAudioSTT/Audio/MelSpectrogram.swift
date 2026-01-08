@@ -3,7 +3,7 @@ import Foundation
 import MLX
 
 /// Computes mel spectrograms for Whisper STT
-/// Matches the Python mlx-audio implementation
+/// Matches the Python mlx-audio implementation exactly
 public enum MelSpectrogram {
 
     /// Compute mel spectrogram from audio waveform
@@ -19,22 +19,21 @@ public enum MelSpectrogram {
                 minSamples: AudioConstants.hopLength, actualSamples: rawSamples.count)
         }
 
-        // Calculate expected frame count (Whisper standard: rawSamples / hopLength)
-        let nFrames = rawSamples.count / AudioConstants.hopLength
+        // Center-pad audio using reflect mode (matching Python librosa/Whisper)
+        let padAmount = AudioConstants.nFFT / 2
+        var samples = reflectPad(rawSamples, padAmount: padAmount)
 
-        // Center-pad audio (Whisper-style: pad by windowSize/2 on each side)
-        // This ensures all frames have full window coverage
-        let padAmount = AudioConstants.whisperWindowSize / 2
-        var samples = [Float](repeating: 0, count: padAmount)
-        samples.append(contentsOf: rawSamples)
-        samples.append(contentsOf: [Float](repeating: 0, count: padAmount))
+        // Calculate number of frames (matching Python's frame count)
+        // Python drops the last frame with freqs[:-1, :] to get exactly N_SAMPLES/HOP_LENGTH frames
+        let computedFrames = 1 + (samples.count - AudioConstants.nFFT) / AudioConstants.hopLength
+        let nFrames = computedFrames - 1  // Drop last frame like Python
 
-        // Create Hann window (400 samples) zero-padded to FFT size (512)
-        let window = paddedHannWindow(
-            windowSize: AudioConstants.whisperWindowSize, fftSize: AudioConstants.nFFT)
+        // Create Hann window (matching Python's periodic=False hanning)
+        let window = hannWindow(size: AudioConstants.nFFT)
 
-        // Setup FFT
-        let log2n = vDSP_Length(log2(Double(AudioConstants.nFFT)))
+        // Setup FFT - find next power of 2 for vDSP
+        let fftSize = nextPowerOf2(AudioConstants.nFFT)
+        let log2n = vDSP_Length(log2(Double(fftSize)))
         guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
             throw MelSpectrogramError.fftSetupFailed
         }
@@ -42,25 +41,26 @@ public enum MelSpectrogram {
 
         let numBins = AudioConstants.nFFT / 2 + 1
 
-        // Compute STFT
-        var magnitudes = [[Float]](
+        // Compute STFT magnitudes squared (power spectrum)
+        var magnitudesSquared = [[Float]](
             repeating: [Float](repeating: 0, count: numBins), count: nFrames)
 
         for frame in 0..<nFrames {
             let start = frame * AudioConstants.hopLength
 
-            // Extract and window frame (all frames now have full window coverage)
-            var windowedFrame = [Float](repeating: 0, count: AudioConstants.nFFT)
-            for i in 0..<AudioConstants.whisperWindowSize {
+            // Extract frame and apply window
+            var windowedFrame = [Float](repeating: 0, count: fftSize)
+            for i in 0..<AudioConstants.nFFT {
                 windowedFrame[i] = samples[start + i] * window[i]
             }
 
-            // Compute FFT magnitude
-            magnitudes[frame] = fftMagnitude(frame: windowedFrame, setup: fftSetup, log2n: log2n)
+            // Compute FFT magnitude squared (power spectrum)
+            magnitudesSquared[frame] = fftMagnitudeSquared(
+                frame: windowedFrame, setup: fftSetup, log2n: log2n, numBins: numBins)
         }
 
-        // Apply mel filterbank
-        let melFilters = createMelFilterbank(nMels: nMels)
+        // Apply mel filterbank with Slaney normalization
+        let melFilters = createMelFilterbank(nMels: nMels, nFFT: AudioConstants.nFFT)
         var melSpec = [[Float]](
             repeating: [Float](repeating: 0, count: nFrames), count: nMels)
 
@@ -68,7 +68,7 @@ public enum MelSpectrogram {
             for frame in 0..<nFrames {
                 var sum: Float = 0
                 for bin in 0..<numBins {
-                    sum += melFilters[mel][bin] * magnitudes[frame][bin]
+                    sum += melFilters[mel][bin] * magnitudesSquared[frame][bin]
                 }
                 melSpec[mel][frame] = sum
             }
@@ -97,23 +97,69 @@ public enum MelSpectrogram {
 
     // MARK: - Private Helpers
 
-    private static func paddedHannWindow(windowSize: Int, fftSize: Int) -> [Float] {
-        var window = [Float](repeating: 0, count: windowSize)
-        vDSP_hann_window(&window, vDSP_Length(windowSize), Int32(vDSP_HANN_NORM))
-        if fftSize > windowSize {
-            window.append(contentsOf: [Float](repeating: 0, count: fftSize - windowSize))
+    private static func nextPowerOf2(_ n: Int) -> Int {
+        var power = 1
+        while power < n {
+            power *= 2
+        }
+        return power
+    }
+
+    private static func reflectPad(_ samples: [Float], padAmount: Int) -> [Float] {
+        guard padAmount > 0 else { return samples }
+        guard samples.count > padAmount else {
+            // Fallback to zero padding for very short audio
+            var padded = [Float](repeating: 0, count: padAmount)
+            padded.append(contentsOf: samples)
+            padded.append(contentsOf: [Float](repeating: 0, count: padAmount))
+            return padded
+        }
+
+        // Reflect prefix: samples[1:padAmount+1] reversed
+        var prefix = [Float]()
+        for i in stride(from: min(padAmount, samples.count - 1), through: 1, by: -1) {
+            prefix.append(samples[i])
+        }
+        // If we need more padding than available samples, repeat
+        while prefix.count < padAmount {
+            prefix.append(prefix.last ?? 0)
+        }
+
+        // Reflect suffix: samples[-(padAmount+1):-1] reversed
+        var suffix = [Float]()
+        let startIdx = max(0, samples.count - padAmount - 1)
+        let endIdx = samples.count - 1
+        for i in stride(from: endIdx - 1, through: startIdx, by: -1) {
+            suffix.append(samples[i])
+        }
+        while suffix.count < padAmount {
+            suffix.append(suffix.last ?? 0)
+        }
+
+        var result = prefix
+        result.append(contentsOf: samples)
+        result.append(contentsOf: suffix)
+        return result
+    }
+
+    private static func hannWindow(size: Int) -> [Float] {
+        // Periodic Hann window (matching numpy's hanning)
+        var window = [Float](repeating: 0, count: size)
+        for i in 0..<size {
+            window[i] = 0.5 * (1.0 - cos(2.0 * Float.pi * Float(i) / Float(size)))
         }
         return window
     }
 
-    private static func fftMagnitude(frame: [Float], setup: FFTSetup, log2n: vDSP_Length) -> [Float]
-    {
+    private static func fftMagnitudeSquared(
+        frame: [Float], setup: FFTSetup, log2n: vDSP_Length, numBins: Int
+    ) -> [Float] {
         let n = frame.count
         let halfN = n / 2
 
         var realp = [Float](repeating: 0, count: halfN)
         var imagp = [Float](repeating: 0, count: halfN)
-        var magnitudes = [Float](repeating: 0, count: halfN + 1)
+        var magnitudes = [Float](repeating: 0, count: numBins)
 
         realp.withUnsafeMutableBufferPointer { realpPtr in
             imagp.withUnsafeMutableBufferPointer { imagpPtr in
@@ -131,28 +177,34 @@ public enum MelSpectrogram {
 
                 vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
 
-                // Compute magnitudes
-                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfN))
+                // Compute magnitudes squared (power spectrum)
+                // For bins 1 to halfN-1
+                for i in 1..<min(halfN, numBins - 1) {
+                    magnitudes[i] = realpPtr[i] * realpPtr[i] + imagpPtr[i] * imagpPtr[i]
+                }
 
-                // Handle DC and Nyquist
+                // DC component (bin 0)
                 magnitudes[0] = realpPtr[0] * realpPtr[0]
-                magnitudes[halfN] = imagpPtr[0] * imagpPtr[0]
+
+                // Nyquist component (bin halfN = numBins-1 for nFFT=400)
+                if numBins > halfN {
+                    magnitudes[halfN] = imagpPtr[0] * imagpPtr[0]
+                }
             }
         }
 
-        // Square root for magnitude
-        var result = [Float](repeating: 0, count: halfN + 1)
-        vvsqrtf(&result, magnitudes, [Int32(halfN + 1)])
+        // vDSP FFT scaling factor
+        let scale = 1.0 / Float(n)
+        vDSP_vsmul(magnitudes, 1, [scale * scale], &magnitudes, 1, vDSP_Length(numBins))
 
-        return result
+        return magnitudes
     }
 
-    private static func createMelFilterbank(nMels: Int) -> [[Float]] {
-        let nFFT = AudioConstants.nFFT
+    private static func createMelFilterbank(nMels: Int, nFFT: Int) -> [[Float]] {
         let sampleRate = AudioConstants.sampleRate
         let numBins = nFFT / 2 + 1
 
-        // Mel scale conversion
+        // HTK mel scale conversion (matching Python)
         func hzToMel(_ hz: Float) -> Float {
             return 2595.0 * log10(1.0 + hz / 700.0)
         }
@@ -161,39 +213,59 @@ public enum MelSpectrogram {
             return 700.0 * (pow(10.0, mel / 2595.0) - 1.0)
         }
 
-        let lowFreq: Float = 0
-        let highFreq = Float(sampleRate) / 2.0
+        let fMin: Float = 0
+        let fMax = Float(sampleRate) / 2.0
 
-        let lowMel = hzToMel(lowFreq)
-        let highMel = hzToMel(highFreq)
+        // Generate mel points
+        let mMin = hzToMel(fMin)
+        let mMax = hzToMel(fMax)
 
-        // Create mel points
         var melPoints = [Float](repeating: 0, count: nMels + 2)
         for i in 0..<(nMels + 2) {
-            melPoints[i] = lowMel + Float(i) * (highMel - lowMel) / Float(nMels + 1)
+            melPoints[i] = mMin + Float(i) * (mMax - mMin) / Float(nMels + 1)
         }
 
-        // Convert to Hz and then to FFT bin
+        // Convert mel points to Hz
         let hzPoints = melPoints.map { melToHz($0) }
-        let binPoints = hzPoints.map { Int(($0 * Float(nFFT)) / Float(sampleRate)) }
 
-        // Create filterbank
+        // Generate all frequency bins
+        var allFreqs = [Float](repeating: 0, count: numBins)
+        for i in 0..<numBins {
+            allFreqs[i] = Float(i) * Float(sampleRate) / Float(nFFT)
+        }
+
+        // Compute filterbank using slopes (matching Python librosa)
         var filterbank = [[Float]](
             repeating: [Float](repeating: 0, count: numBins), count: nMels)
 
         for m in 0..<nMels {
-            let left = binPoints[m]
-            let center = binPoints[m + 1]
-            let right = binPoints[m + 2]
+            let fLeft = hzPoints[m]
+            let fCenter = hzPoints[m + 1]
+            let fRight = hzPoints[m + 2]
 
-            for k in left..<center {
-                if k < numBins && center > left {
-                    filterbank[m][k] = Float(k - left) / Float(center - left)
+            let fDiffDown = fCenter - fLeft
+            let fDiffUp = fRight - fCenter
+
+            for k in 0..<numBins {
+                let freq = allFreqs[k]
+
+                if freq >= fLeft && freq < fCenter && fDiffDown > 0 {
+                    filterbank[m][k] = (freq - fLeft) / fDiffDown
+                } else if freq >= fCenter && freq <= fRight && fDiffUp > 0 {
+                    filterbank[m][k] = (fRight - freq) / fDiffUp
                 }
             }
-            for k in center..<right {
-                if k < numBins && right > center {
-                    filterbank[m][k] = Float(right - k) / Float(right - center)
+        }
+
+        // Apply Slaney normalization: 2.0 / (f_right - f_left)
+        for m in 0..<nMels {
+            let fLeft = hzPoints[m]
+            let fRight = hzPoints[m + 2]
+            let bandwidth = fRight - fLeft
+            if bandwidth > 0 {
+                let enorm = 2.0 / bandwidth
+                for k in 0..<numBins {
+                    filterbank[m][k] *= enorm
                 }
             }
         }
