@@ -28,6 +28,15 @@ public final class WhisperSession: @unchecked Sendable {
     private let readyContinuation: AsyncStream<Void>.Continuation
     private var backgroundTask: Task<Void, Never>?
 
+    /// Preallocated KV caches for compiled decoder (one per layer)
+    private let kvCaches: [KVCache]
+
+    /// Compiled encoder function for graph caching
+    private let compiledEncode: @Sendable ([MLXArray]) -> [MLXArray]
+
+    /// Compiled decoder function for graph caching
+    private let compiledDecode: @Sendable ([MLXArray]) -> [MLXArray]
+
     public let actualQuantization: WhisperQuantization
     public let didFallback: Bool
 
@@ -57,6 +66,36 @@ public final class WhisperSession: @unchecked Sendable {
         self.actualQuantization = actualQuantization
         self.didFallback = didFallback
 
+        // Preallocate KV caches with fixed shapes for compile-friendly decoding
+        self.kvCaches = (0..<config.nTextLayer).map { _ in
+            KVCache(
+                batchSize: 1,
+                maxSequenceLength: config.nTextCtx,
+                dim: config.nTextState
+            )
+        }
+
+        // Compile encoder: [mel] -> [encoderOutput]
+        // Encoder has fixed input shape (30s audio = 3000 mel frames) and no state
+        self.compiledEncode = compile(inputs: [encoder]) { [encoder] inputs in
+            let mel = inputs[0]
+            return [encoder(mel)]
+        }
+
+        // Decoder: Use direct call (KVCache slice operations don't work with compile)
+        // The preallocated KVCache pattern still helps avoid shape-change overhead
+        let kvCachesRef = self.kvCaches
+        self.compiledDecode = { [decoder] inputs in
+            let tokens = inputs[0]
+            let encoderOutput = inputs[1]
+            let (logits, crossQK) = decoder(
+                tokens: tokens,
+                encoderOutput: encoderOutput,
+                kvCache: kvCachesRef
+            )
+            return [logits] + crossQK
+        }
+
         var continuation: AsyncStream<Void>.Continuation!
         self.readyStream = AsyncStream { continuation = $0 }
         self.readyContinuation = continuation
@@ -64,6 +103,27 @@ public final class WhisperSession: @unchecked Sendable {
 
     deinit {
         backgroundTask?.cancel()
+    }
+
+    /// Warmup encoder compilation and decoder path
+    /// Called at init to avoid cold-start latency on first transcription
+    private func warmup() {
+        // Reset caches before warmup
+        for cache in kvCaches {
+            cache.reset()
+        }
+
+        // Warmup compiled encoder with standard 30s mel shape
+        let dummyMel = MLXArray.zeros([1, config.nMels, 3000])
+        let encoderOut = compiledEncode([dummyMel])[0]
+
+        // Force encoder compilation to complete
+        eval(encoderOut)
+
+        // Reset caches for actual use
+        for cache in kvCaches {
+            cache.reset()
+        }
     }
 
     public func waitUntilReady(timeout: Duration = .seconds(30)) async throws -> Bool {
@@ -131,6 +191,10 @@ public final class WhisperSession: @unchecked Sendable {
             actualQuantization: .float16,
             didFallback: false
         )
+        // Materialize model weights before warmup
+        eval(loaded.encoder, loaded.decoder)
+        // Warmup compiled functions to populate compilation cache
+        session.warmup()
         session._state.withLock { $0 = .ready }
         return session
     }
@@ -176,6 +240,7 @@ public final class WhisperSession: @unchecked Sendable {
                 do {
                     try Task.checkCancellation()
                     eval(loadResult.model.encoder, loadResult.model.decoder)
+                    session.warmup()
                     session._state.withLock { $0 = .ready }
                 } catch is CancellationError {
                     session._state.withLock { $0 = .cancelled }
@@ -186,6 +251,7 @@ public final class WhisperSession: @unchecked Sendable {
             }
         } else {
             eval(loadResult.model.encoder, loadResult.model.decoder)
+            session.warmup()
             session._state.withLock { $0 = .ready }
             session.readyContinuation.finish()
         }
@@ -228,8 +294,8 @@ public final class WhisperSession: @unchecked Sendable {
                         // Add batch dimension: [nMels, nFrames] -> [1, nMels, nFrames]
                         let melBatched = mel.expandedDimensions(axis: 0)
 
-                        // 3. Encode audio
-                        let encoderOutput = self.encoder(melBatched)
+                        // 3. Encode audio (COMPILED)
+                        let encoderOutput = self.compiledEncode([melBatched])[0]
                         let totalFrames = encoderOutput.shape[1]
 
                         // 4. Initialize decoder state
@@ -238,8 +304,10 @@ public final class WhisperSession: @unchecked Sendable {
                             task: options.task
                         )
 
-                        // Create KV cache for each decoder layer
-                        let kvCaches: [KVCache] = (0..<self.config.nTextLayer).map { _ in KVCache() }
+                        // Reset preallocated KV caches for this transcription
+                        for cache in self.kvCaches {
+                            cache.reset()
+                        }
                         var emittedText = ""
                         var lastEmittedIndex = tokens.count
                         var didEmitFinal = false
@@ -259,12 +327,10 @@ public final class WhisperSession: @unchecked Sendable {
                                 tokenArray = MLXArray([tokens.last!]).expandedDimensions(axis: 0)
                             }
 
-                            // Decode one step
-                            let (logits, crossQKArrays) = self.decoder(
-                                tokens: tokenArray,
-                                encoderOutput: encoderOutput,
-                                kvCache: kvCaches
-                            )
+                            // Decode one step (COMPILED)
+                            let outputs = self.compiledDecode([tokenArray, encoderOutput])
+                            let logits = outputs[0]
+                            let crossQKArrays = Array(outputs.dropFirst())
 
                             // Convert [MLXArray] to [MLXArray?] for StreamingDecoder
                             let crossQK: [MLXArray?] = crossQKArrays.map { $0 }

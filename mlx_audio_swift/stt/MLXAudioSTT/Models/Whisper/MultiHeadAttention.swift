@@ -106,42 +106,59 @@ public class WhisperMultiHeadAttention: Module {
     }
 }
 
-/// Key-Value cache for incremental decoding in autoregressive generation
+/// Preallocated Key-Value cache for compile-friendly incremental decoding.
+/// Uses fixed-shape arrays with offset tracking to avoid shape changes that would
+/// trigger recompilation when using `mx.compile()`.
 public class KVCache {
-    private var _keys: MLXArray?
-    private var _values: MLXArray?
+    private var keys: MLXArray
+    private var values: MLXArray
+    private var offset: Int = 0
     private let lock = NSLock()
+
+    public let maxSequenceLength: Int
+    public let dim: Int
 
     /// Current sequence length in the cache (0 if empty)
     public var sequenceLength: Int {
-        lock.withLock { _keys?.shape[1] ?? 0 }
+        lock.withLock { offset }
     }
 
-    public init() {}
+    /// Initialize cache with preallocated arrays
+    /// - Parameters:
+    ///   - batchSize: Batch size (typically 1)
+    ///   - maxSequenceLength: Maximum sequence length (Whisper: 448 tokens)
+    ///   - dim: Hidden dimension (nTextState)
+    public init(batchSize: Int = 1, maxSequenceLength: Int = 448, dim: Int) {
+        self.maxSequenceLength = maxSequenceLength
+        self.dim = dim
+        self.keys = MLXArray.zeros([batchSize, maxSequenceLength, dim])
+        self.values = MLXArray.zeros([batchSize, maxSequenceLength, dim])
+    }
 
-    /// Update cache with new keys and values, concatenating with existing cache
+    /// Update cache using slice assignment (fixed shape, no concat)
     /// - Parameters:
     ///   - keys: New key tensor, shape [batch, new_seq, dim]
     ///   - values: New value tensor, shape [batch, new_seq, dim]
-    /// - Returns: Concatenated (keys, values) including history
+    /// - Returns: (keys, values) containing all cached entries up to current offset
     public func update(keys newKeys: MLXArray, values newValues: MLXArray) -> (MLXArray, MLXArray) {
         lock.withLock {
-            if let existingKeys = _keys, let existingValues = _values {
-                _keys = concatenated([existingKeys, newKeys], axis: 1)
-                _values = concatenated([existingValues, newValues], axis: 1)
-            } else {
-                _keys = newKeys
-                _values = newValues
-            }
-            return (_keys!, _values!)
+            let newSeqLen = newKeys.shape[1]
+            let end = offset + newSeqLen
+
+            // Slice assignment - shape stays fixed
+            keys[0..., offset..<end, 0...] = newKeys
+            values[0..., offset..<end, 0...] = newValues
+            offset = end
+
+            // Return only the valid portion
+            return (keys[0..., 0..<offset, 0...], values[0..., 0..<offset, 0...])
         }
     }
 
-    /// Reset the cache, clearing all stored keys and values
+    /// Reset the cache for a new transcription
     public func reset() {
         lock.withLock {
-            _keys = nil
-            _values = nil
+            offset = 0
         }
     }
 }
