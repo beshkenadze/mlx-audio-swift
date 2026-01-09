@@ -27,6 +27,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.29.1"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.1.6"),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.5.0"),
+        .package(url: "https://github.com/vapor/console-kit.git", from: "4.15.0"),
     ],
     targets: [
         .target(
@@ -67,6 +68,7 @@ let package = Package(
             dependencies: [
                 "MLXAudioSTT",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "ConsoleKitTerminal", package: "console-kit"),
             ],
             path: "mlx_audio_swift/stt/STTDemo"
         ),

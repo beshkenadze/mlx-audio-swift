@@ -1,10 +1,12 @@
 import AVFoundation
+import ConsoleKitTerminal
 import Foundation
 import MLX
 import MLXAudioSTT
 
 @main
 struct STTDemo {
+    static let terminal = Terminal()
     enum ProcessingMode: String, CaseIterable {
         case short
         case long
@@ -64,7 +66,7 @@ struct STTDemo {
         let args = CommandLine.arguments
 
         if args.contains("--version") || args.contains("-V") {
-            print("stt-demo \(BuildInfo.full)")
+            terminal.output("stt-demo ".consoleText(.info) + BuildInfo.full.consoleText())
             return
         }
 
@@ -73,7 +75,7 @@ struct STTDemo {
             return
         }
 
-        print("stt-demo v\(BuildInfo.full)")
+        terminal.output("stt-demo ".consoleText(.info) + "v\(BuildInfo.full)".consoleText(.success))
 
         guard let config = parseArguments(args) else {
             return
@@ -88,17 +90,26 @@ struct STTDemo {
         do {
             let audio = try loadAudio(from: config.audioPath)
             let audioDuration = Double(audio.shape[0]) / Double(AudioConstants.sampleRate)
-            print("Loaded audio: \(audio.shape[0]) samples (\(String(format: "%.1f", audioDuration))s)")
+            terminal.output(
+                "Loaded: ".consoleText(.info) +
+                "\(audio.shape[0]) samples ".consoleText() +
+                "(\(String(format: "%.1f", audioDuration))s)".consoleText(.plain)
+            )
 
             let effectiveMode = resolveMode(config.mode, audioDuration: audioDuration)
-            print("Processing mode: \(effectiveMode.rawValue)")
+            terminal.output("Mode: ".consoleText(.info) + effectiveMode.rawValue.consoleText())
 
             if effectiveMode == .long {
-                print("Chunking strategy: \(config.strategy.rawValue)")
+                terminal.output("Strategy: ".consoleText(.info) + config.strategy.rawValue.consoleText())
             }
 
-            let loadingMode = config.fast ? "fast (int4)" : "default (float16)"
-            print("\nLoading \(config.modelName) model (\(loadingMode))...")
+            let loadingMode = config.fast ? "int4 quantized" : "float16"
+            terminal.output("")
+            terminal.output(
+                "Loading ".consoleText() +
+                config.modelName.consoleText(.info) +
+                " model (\(loadingMode))...".consoleText()
+            )
 
             switch effectiveMode {
             case .short:
@@ -115,7 +126,7 @@ struct STTDemo {
             }
 
         } catch {
-            print("Error: \(error)")
+            terminal.output("Error: ".consoleText(.error) + "\(error)".consoleText())
         }
     }
 
@@ -144,20 +155,22 @@ struct STTDemo {
         var transcriptionOptions = TranscriptionOptions.default
         transcriptionOptions.language = language
 
-        print("\nTranscribing...")
-        print("─────────────────────────────────────────")
+        terminal.output("")
+        terminal.output("Transcribing...".consoleText(.info))
+        terminal.output("─────────────────────────────────────────".consoleText(.plain))
 
         for try await result in session.transcribe(audio, sampleRate: AudioConstants.sampleRate, options: transcriptionOptions) {
             if result.isFinal {
-                print("\r\(result.text)")
+                print("\r\u{1B}[K", terminator: "")
+                terminal.output(result.text.consoleText(.success))
             } else {
-                print("\r\(result.text)...", terminator: "")
+                print("\r\u{1B}[K\(result.text)...", terminator: "")
                 fflush(stdout)
             }
         }
 
-        print("─────────────────────────────────────────")
-        print("Done!")
+        terminal.output("─────────────────────────────────────────".consoleText(.plain))
+        terminal.output("✓ Done!".consoleText(.success))
     }
 
     static func transcribeLong(
@@ -183,16 +196,15 @@ struct STTDemo {
         var transcriptionOptions = TranscriptionOptions.default
         transcriptionOptions.language = language
 
-        print("\nTranscribing long audio...")
-        print("─────────────────────────────────────────")
+        terminal.output("")
+        terminal.output("Transcribing long audio...".consoleText(.info))
+        terminal.output("─────────────────────────────────────────".consoleText(.plain))
 
         let stream: AsyncThrowingStream<TranscriptionProgress, Error> = processor.transcribe(
             audio,
             sampleRate: AudioConstants.sampleRate,
             options: transcriptionOptions
         )
-
-        var lastPrintedLineCount = 0
 
         for try await progress in stream {
             let percent = Int(progress.progress * 100)
@@ -201,57 +213,57 @@ struct STTDemo {
 
             if progress.isFinal {
                 if verbose {
-                    print("")  // Newline after streaming output
+                    print("")
                 }
-                print("\r\u{1B}[K") // Clear line
-                print("Progress: 100% \(chunkInfo) \(timeInfo)")
-                print("─────────────────────────────────────────")
+                print("\r\u{1B}[K", terminator: "")
+                terminal.output(
+                    "Progress: ".consoleText() +
+                    "100%".consoleText(.success) +
+                    " \(chunkInfo) \(timeInfo)".consoleText(.plain)
+                )
+                terminal.output("─────────────────────────────────────────".consoleText(.plain))
                 if !verbose {
-                    print(progress.text)
+                    terminal.output(progress.text.consoleText(.success))
                 }
             } else if verbose {
-                // SDK now handles overlap deduplication via MergeConfig.deduplicateOverlap
+                let prefix = "[\(progress.chunkIndex + 1)] "
                 let displayText = progress.chunkText
 
                 if progress.isPartial {
-                    // Clear previous multi-line output before printing new
-                    clearLines(lastPrintedLineCount)
-
-                    let prefix = "\u{1B}[90m[\(progress.chunkIndex + 1)]\u{1B}[0m "
-                    let output = prefix + displayText
-                    print(output, terminator: "")
+                    // Truncate to terminal width to avoid line wrap issues with \r
+                    let maxWidth = getTerminalWidth() - prefix.count - 3  // "..." suffix
+                    let truncated = displayText.count > maxWidth
+                        ? String(displayText.prefix(maxWidth)) + "..."
+                        : displayText
+                    print("\r\u{1B}[K\(prefix)\(truncated)", terminator: "")
                     fflush(stdout)
-
-                    // Estimate lines used (rough: assume 80 char terminal width)
-                    lastPrintedLineCount = max(1, (output.count + 79) / 80)
                 } else {
-                    // Chunk completed - print final text with newline
-                    clearLines(lastPrintedLineCount)
-                    print("\u{1B}[90m[\(progress.chunkIndex + 1)]\u{1B}[0m \(displayText)")
-                    lastPrintedLineCount = 0
+                    // Final chunk result - print full text on new line
+                    print("\r\u{1B}[K\(prefix)\(displayText)")
                 }
             } else {
-                print("\rProgress: \(percent)% \(chunkInfo) \(timeInfo)", terminator: "")
+                print("\r\u{1B}[KProgress: \(percent)% \(chunkInfo) \(timeInfo)", terminator: "")
                 fflush(stdout)
             }
         }
 
-        print("─────────────────────────────────────────")
-        print("Done!")
+        terminal.output("─────────────────────────────────────────".consoleText(.plain))
+        terminal.output("✓ Done!".consoleText(.success))
     }
 
     static func createProgressHandler() -> (WhisperProgress) -> Void {
         return { progress in
             switch progress {
             case .downloading(let fraction):
-                print("\r  Downloading: \(Int(fraction * 100))%", terminator: "")
+                print("\r\u{1B}[K  Downloading: \(Int(fraction * 100))%", terminator: "")
                 fflush(stdout)
             case .loading(let fraction):
                 if fraction >= 1.0 {
-                    print("\r  Loading: done        ")
+                    print("\r\u{1B}[K", terminator: "")
+                    terminal.output("  Loading: ".consoleText() + "done".consoleText(.success))
                 }
             case .encoding:
-                print("  Encoding audio...")
+                terminal.output("  Encoding audio...".consoleText(.plain))
             case .decoding:
                 break
             }
@@ -470,13 +482,13 @@ struct STTDemo {
         return MLXArray(resampled)
     }
 
-    /// Clear N lines above cursor for multi-line streaming updates
-    static func clearLines(_ count: Int) {
-        guard count > 0 else { return }
-        for _ in 0..<count {
-            print("\u{1B}[A\u{1B}[2K", terminator: "")
+    /// Get terminal width, defaulting to 80 if unavailable
+    static func getTerminalWidth() -> Int {
+        var ws = winsize()
+        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 {
+            return Int(ws.ws_col)
         }
-        print("\r", terminator: "")
+        return 80
     }
 }
 
