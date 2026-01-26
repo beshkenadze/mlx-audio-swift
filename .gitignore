@@ -2,4 +2,16 @@
 docs/
 .serena/
 claudedocs/
+.swiftpm
 .DS_Store
+.xcbkptlist
+.claude
+xcuserdata/*
+*.pbxproj
+*.resolved
+*.xcworkspace
+*.xcuserdata
+*.xcuserstate
+*.xcuserdatad
+*.xcuserdatad/xcdebugger
+*.xcuserdatad/xcdebugger/Breakpoints_v2.xcbkptlist
