@@ -384,7 +384,7 @@ public final class WhisperSession: @unchecked Sendable {
                             let nextToken = Int(MLX.argMax(logits[0, -1]).item(Int.self))
 
                             // Check for end of transcription
-                            if nextToken == WhisperTokenizer.eotToken {
+                            if nextToken == self.tokenizer.eotTokenId {
                                 let finalTokens = Array(tokens.dropFirst(lastEmittedIndex))
                                 let finalText = self.tokenizer.decode(finalTokens)
                                 let fullText = emittedText + finalText
@@ -663,7 +663,7 @@ extension WhisperSession: STTSessionProtocol {
                             generationTokenCount += 1
 
                             // Check for end of transcription
-                            if nextToken == WhisperTokenizer.eotToken {
+                            if nextToken == self.tokenizer.eotTokenId {
                                 let finalTokens = Array(tokens.dropFirst(lastEmittedIndex))
                                 let finalText = self.tokenizer.decode(finalTokens)
                                 let fullText = (emittedText + finalText).trimmingCharacters(in: .whitespaces)

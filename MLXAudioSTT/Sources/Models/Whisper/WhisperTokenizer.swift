@@ -130,25 +130,107 @@ public final class WhisperTokenizer: @unchecked Sendable {
     // MARK: - Properties
 
     private let tokenizer: Tokenizer
+    public let eotTokenId: Int
+    public let sotTokenId: Int
+    public let translateTokenId: Int
+    public let transcribeTokenId: Int
+    public let noTimestampsTokenId: Int
+    public let timestampBeginId: Int
+    private let languageTokenMap: [String: Int]
+    private let languageCodeById: [Int: String]
 
     // MARK: - Initialization
 
     /// Initialize from a model folder containing tokenizer.json and tokenizer_config.json
     /// - Parameter modelFolder: URL to the model directory
     public init(modelFolder: URL) async throws {
-        self.tokenizer = try await AutoTokenizer.from(modelFolder: modelFolder)
+        let tokenizer = try await AutoTokenizer.from(modelFolder: modelFolder)
+        let resolved = Self.resolveSpecialTokens(for: tokenizer)
+        self.tokenizer = tokenizer
+        self.eotTokenId = resolved.eotTokenId
+        self.sotTokenId = resolved.sotTokenId
+        self.translateTokenId = resolved.translateTokenId
+        self.transcribeTokenId = resolved.transcribeTokenId
+        self.noTimestampsTokenId = resolved.noTimestampsTokenId
+        self.timestampBeginId = resolved.timestampBeginId
+        self.languageTokenMap = resolved.languageTokenMap
+        self.languageCodeById = resolved.languageCodeById
     }
 
     /// Initialize from a pretrained HuggingFace model
     /// - Parameter pretrained: The model identifier on HuggingFace (e.g., "openai/whisper-large-v3")
     public init(pretrained: String) async throws {
-        self.tokenizer = try await AutoTokenizer.from(pretrained: pretrained)
+        let tokenizer = try await AutoTokenizer.from(pretrained: pretrained)
+        let resolved = Self.resolveSpecialTokens(for: tokenizer)
+        self.tokenizer = tokenizer
+        self.eotTokenId = resolved.eotTokenId
+        self.sotTokenId = resolved.sotTokenId
+        self.translateTokenId = resolved.translateTokenId
+        self.transcribeTokenId = resolved.transcribeTokenId
+        self.noTimestampsTokenId = resolved.noTimestampsTokenId
+        self.timestampBeginId = resolved.timestampBeginId
+        self.languageTokenMap = resolved.languageTokenMap
+        self.languageCodeById = resolved.languageCodeById
     }
 
     /// Initialize with an existing tokenizer
     /// - Parameter tokenizer: A pre-loaded Tokenizer instance
     public init(tokenizer: Tokenizer) {
+        let resolved = Self.resolveSpecialTokens(for: tokenizer)
         self.tokenizer = tokenizer
+        self.eotTokenId = resolved.eotTokenId
+        self.sotTokenId = resolved.sotTokenId
+        self.translateTokenId = resolved.translateTokenId
+        self.transcribeTokenId = resolved.transcribeTokenId
+        self.noTimestampsTokenId = resolved.noTimestampsTokenId
+        self.timestampBeginId = resolved.timestampBeginId
+        self.languageTokenMap = resolved.languageTokenMap
+        self.languageCodeById = resolved.languageCodeById
+    }
+
+    private static func resolveSpecialTokens(for tokenizer: Tokenizer) -> (
+        eotTokenId: Int,
+        sotTokenId: Int,
+        translateTokenId: Int,
+        transcribeTokenId: Int,
+        noTimestampsTokenId: Int,
+        timestampBeginId: Int,
+        languageTokenMap: [String: Int],
+        languageCodeById: [Int: String]
+    ) {
+        func tokenIdIfPresent(_ token: String) -> Int? {
+            guard let id = tokenizer.convertTokenToId(token) else { return nil }
+            return tokenizer.convertIdToToken(id) == token ? id : nil
+        }
+
+        let eotTokenId = tokenIdIfPresent("<|endoftext|>") ?? Self.eotToken
+        let sotTokenId = tokenIdIfPresent("<|startoftranscript|>") ?? Self.sotToken
+        let translateTokenId = tokenIdIfPresent("<|translate|>") ?? Self.translateToken
+        let transcribeTokenId = tokenIdIfPresent("<|transcribe|>") ?? Self.transcribeToken
+        let noTimestampsTokenId = tokenIdIfPresent("<|notimestamps|>") ?? Self.noTimestampsToken
+        let timestampBeginId = tokenIdIfPresent("<|0.00|>") ?? Self.timestampBegin
+
+        var languageMap: [String: Int] = [:]
+        languageMap.reserveCapacity(Self.languageOffsets.count)
+        for language in Self.languageOffsets.keys {
+            let token = "<|\(language)|>"
+            if let tokenId = tokenIdIfPresent(token) {
+                languageMap[language] = tokenId
+            }
+        }
+
+        let languageCodeById = Dictionary(uniqueKeysWithValues: languageMap.map { ($0.value, $0.key) })
+
+        return (
+            eotTokenId: eotTokenId,
+            sotTokenId: sotTokenId,
+            translateTokenId: translateTokenId,
+            transcribeTokenId: transcribeTokenId,
+            noTimestampsTokenId: noTimestampsTokenId,
+            timestampBeginId: timestampBeginId,
+            languageTokenMap: languageMap,
+            languageCodeById: languageCodeById
+        )
     }
 
     // MARK: - Basic Encoding/Decoding
@@ -179,21 +261,21 @@ public final class WhisperTokenizer: @unchecked Sendable {
     /// - Parameter tokenId: The token ID to check
     /// - Returns: True if the token is a special token
     public func isSpecialToken(_ tokenId: Int) -> Bool {
-        tokenId >= Self.eotToken
+        tokenId >= eotTokenId
     }
 
     /// Check if a token ID is a timestamp token
     /// - Parameter tokenId: The token ID to check
     /// - Returns: True if the token is a timestamp token
     public func isTimestampToken(_ tokenId: Int) -> Bool {
-        tokenId >= Self.timestampBegin
+        tokenId >= timestampBeginId
     }
 
     /// Check if a token ID is a language token
     /// - Parameter tokenId: The token ID to check
     /// - Returns: True if the token is a language token
     public func isLanguageToken(_ tokenId: Int) -> Bool {
-        tokenId >= Self.languageTokenStart && tokenId < Self.languageTokenEnd
+        languageCodeById[tokenId] != nil
     }
 
     // MARK: - Timestamp Handling
@@ -203,14 +285,14 @@ public final class WhisperTokenizer: @unchecked Sendable {
     /// - Returns: Time in seconds, or nil if not a timestamp token
     public func timestampToSeconds(_ tokenId: Int) -> Double? {
         guard isTimestampToken(tokenId) else { return nil }
-        return Double(tokenId - Self.timestampBegin) * Self.secondsPerTimestampToken
+        return Double(tokenId - timestampBeginId) * Self.secondsPerTimestampToken
     }
 
     /// Convert seconds to a timestamp token ID
     /// - Parameter seconds: Time in seconds
     /// - Returns: The corresponding timestamp token ID
     public func secondsToTimestampToken(_ seconds: Double) -> Int {
-        Self.timestampBegin + Int(seconds / Self.secondsPerTimestampToken)
+        timestampBeginId + Int(seconds / Self.secondsPerTimestampToken)
     }
 
     /// Decode tokens with timestamp extraction
@@ -255,24 +337,19 @@ public final class WhisperTokenizer: @unchecked Sendable {
     /// - Parameter language: ISO 639-1 language code (e.g., "en", "ja", "zh")
     /// - Returns: The language token ID, or nil if the language is not supported
     public func languageToken(for language: String) -> Int? {
-        guard let offset = Self.languageOffsets[language.lowercased()] else {
-            return nil
-        }
-        return Self.languageTokenStart + offset
+        languageTokenMap[language.lowercased()]
     }
 
     /// Get the ISO language code for a language token
     /// - Parameter tokenId: A language token ID
     /// - Returns: The ISO language code, or nil if not a language token
     public func languageCode(for tokenId: Int) -> String? {
-        guard isLanguageToken(tokenId) else { return nil }
-        let offset = tokenId - Self.languageTokenStart
-        return Self.languageOffsets.first { $0.value == offset }?.key
+        languageCodeById[tokenId]
     }
 
-    /// List all supported language codes
-    public static var supportedLanguages: [String] {
-        Array(languageOffsets.keys).sorted()
+    /// List all supported language codes for this tokenizer
+    public var supportedLanguages: [String] {
+        Array(languageTokenMap.keys).sorted()
     }
 
     // MARK: - Initial Decoder Tokens
@@ -288,7 +365,7 @@ public final class WhisperTokenizer: @unchecked Sendable {
         task: TranscriptionOptions.TranscriptionTask = .transcribe,
         includeTimestamps: Bool = true
     ) -> [Int] {
-        var tokens: [Int] = [Self.sotToken]
+        var tokens: [Int] = [sotTokenId]
 
         // Add language token if specified
         if let language = language, let langToken = languageToken(for: language) {
@@ -298,14 +375,14 @@ public final class WhisperTokenizer: @unchecked Sendable {
         // Add task token
         switch task {
         case .transcribe:
-            tokens.append(Self.transcribeToken)
+            tokens.append(transcribeTokenId)
         case .translate:
-            tokens.append(Self.translateToken)
+            tokens.append(translateTokenId)
         }
 
         // Add no-timestamps token if timestamps are disabled
         if !includeTimestamps {
-            tokens.append(Self.noTimestampsToken)
+            tokens.append(noTimestampsTokenId)
         }
 
         return tokens
