@@ -143,6 +143,27 @@ public enum WhisperModelLoader {
         )
     }
 
+    /// Load a Whisper model from a custom HuggingFace repo ID
+    /// - Parameters:
+    ///   - repoId: The HuggingFace repo ID containing Whisper weights
+    ///   - model: The Whisper model variant (for alignment heads lookup)
+    ///   - tokenizerRepoId: Optional tokenizer repo override
+    ///   - progressHandler: Optional callback for download progress
+    /// - Returns: Loaded model and tokenizer directory
+    public static func load(
+        repoId: String,
+        model: WhisperModel,
+        tokenizerRepoId: String? = nil,
+        progressHandler: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> LoadedModel {
+        try await loadFromRepo(
+            repoId: repoId,
+            model: model,
+            tokenizerRepoId: tokenizerRepoId,
+            progressHandler: progressHandler
+        )
+    }
+
     /// Load a Whisper model with quantization support
     /// - Parameters:
     ///   - model: The Whisper model variant to load
@@ -192,6 +213,7 @@ public enum WhisperModelLoader {
     private static func loadFromRepo(
         repoId repoIdString: String,
         model: WhisperModel,
+        tokenizerRepoId: String? = nil,
         progressHandler: (@Sendable (Progress) -> Void)?
     ) async throws -> LoadedModel {
         guard let repo = Repo.ID(rawValue: repoIdString) else {
@@ -231,8 +253,9 @@ public enum WhisperModelLoader {
             )
         }
 
+        let tokenizerRepoIdString = tokenizerRepoId ?? Self.tokenizerRepoId(for: model)
         let tokenizerDirectory = try await downloadTokenizer(
-            for: model,
+            repoIdString: tokenizerRepoIdString,
             client: client,
             cache: cache,
             progressHandler: progressHandler
@@ -294,9 +317,22 @@ public enum WhisperModelLoader {
         cache: HubCache,
         progressHandler: (@Sendable (Progress) -> Void)?
     ) async throws -> URL {
-        let tokenizerRepoIdString = tokenizerRepoId(for: model)
-        guard let tokenizerRepo = Repo.ID(rawValue: tokenizerRepoIdString) else {
-            throw WhisperError.invalidModelFormat("Invalid tokenizer repo ID: \(tokenizerRepoIdString)")
+        try await downloadTokenizer(
+            repoIdString: tokenizerRepoId(for: model),
+            client: client,
+            cache: cache,
+            progressHandler: progressHandler
+        )
+    }
+
+    private static func downloadTokenizer(
+        repoIdString: String,
+        client: HubClient,
+        cache: HubCache,
+        progressHandler: (@Sendable (Progress) -> Void)?
+    ) async throws -> URL {
+        guard let tokenizerRepo = Repo.ID(rawValue: repoIdString) else {
+            throw WhisperError.invalidModelFormat("Invalid tokenizer repo ID: \(repoIdString)")
         }
 
         let tokenizerSnapshotDir = cache.snapshotsDirectory(repo: tokenizerRepo, kind: .model)
@@ -341,14 +377,75 @@ public enum WhisperModelLoader {
         }
 
         let configData = try Data(contentsOf: configURL)
+        let decoder = JSONDecoder()
 
-        var config = try JSONDecoder().decode(WhisperConfiguration.self, from: configData)
+        do {
+            var config = try decoder.decode(WhisperConfiguration.self, from: configData)
 
-        if config.alignmentHeads.isEmpty {
-            config.alignmentHeads = WhisperAlignmentHeads.heads(for: model)
+            if config.alignmentHeads.isEmpty {
+                config.alignmentHeads = WhisperAlignmentHeads.heads(for: model)
+            }
+
+            return config
+        } catch {
+            guard let hfConfig = try? decoder.decode(HFWhisperConfig.self, from: configData),
+                  let nMels = hfConfig.numMelBins,
+                  let nAudioCtx = hfConfig.maxSourcePositions,
+                  let nAudioState = hfConfig.dModel,
+                  let nAudioHead = hfConfig.encoderAttentionHeads,
+                  let nAudioLayer = hfConfig.encoderLayers,
+                  let nVocab = hfConfig.vocabSize,
+                  let nTextCtx = hfConfig.maxTargetPositions,
+                  let nTextState = hfConfig.dModel,
+                  let nTextHead = hfConfig.decoderAttentionHeads,
+                  let nTextLayer = hfConfig.decoderLayers else {
+                throw error
+            }
+
+            var config = WhisperConfiguration(
+                nMels: nMels,
+                nAudioCtx: nAudioCtx,
+                nAudioState: nAudioState,
+                nAudioHead: nAudioHead,
+                nAudioLayer: nAudioLayer,
+                nVocab: nVocab,
+                nTextCtx: nTextCtx,
+                nTextState: nTextState,
+                nTextHead: nTextHead,
+                nTextLayer: nTextLayer,
+                alignmentHeads: []
+            )
+
+            if config.alignmentHeads.isEmpty {
+                config.alignmentHeads = WhisperAlignmentHeads.heads(for: model)
+            }
+
+            return config
         }
+    }
 
-        return config
+    private struct HFWhisperConfig: Codable {
+        let numMelBins: Int?
+        let maxSourcePositions: Int?
+        let dModel: Int?
+        let encoderAttentionHeads: Int?
+        let encoderLayers: Int?
+        let vocabSize: Int?
+        let maxTargetPositions: Int?
+        let decoderAttentionHeads: Int?
+        let decoderLayers: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case numMelBins = "num_mel_bins"
+            case maxSourcePositions = "max_source_positions"
+            case dModel = "d_model"
+            case encoderAttentionHeads = "encoder_attention_heads"
+            case encoderLayers = "encoder_layers"
+            case vocabSize = "vocab_size"
+            case maxTargetPositions = "max_target_positions"
+            case decoderAttentionHeads = "decoder_attention_heads"
+            case decoderLayers = "decoder_layers"
+        }
     }
 
     // MARK: - Weight Loading

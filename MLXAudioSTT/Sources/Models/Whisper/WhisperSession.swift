@@ -199,6 +199,50 @@ public final class WhisperSession: @unchecked Sendable {
         return session
     }
 
+    public static func fromRepo(
+        repoId: String,
+        model: WhisperModel,
+        tokenizerRepoId: String? = nil,
+        quantization: WhisperQuantization = .float16,
+        streaming: StreamingConfig = .default,
+        progressHandler: ((WhisperProgress) -> Void)? = nil
+    ) async throws -> WhisperSession {
+        progressHandler?(.downloading(0))
+
+        let loaded = try await WhisperModelLoader.load(
+            repoId: repoId,
+            model: model,
+            tokenizerRepoId: tokenizerRepoId,
+            progressHandler: { progress in
+                let fraction = Float(progress.fractionCompleted)
+                progressHandler?(.downloading(fraction * 0.8))
+            }
+        )
+
+        progressHandler?(.loading(0.9))
+
+        let tokenizer = try await WhisperTokenizer(modelFolder: loaded.tokenizerDirectory)
+
+        progressHandler?(.loading(1.0))
+
+        let session = WhisperSession(
+            modelType: model,
+            streamingConfig: streaming,
+            encoder: loaded.encoder,
+            decoder: loaded.decoder,
+            tokenizer: tokenizer,
+            config: loaded.config,
+            actualQuantization: quantization,
+            didFallback: false
+        )
+        // Materialize model weights before warmup
+        eval(loaded.encoder, loaded.decoder)
+        // Warmup compiled functions to populate compilation cache
+        session.warmup()
+        session._state.withLock { $0 = .ready }
+        return session
+    }
+
     public static func fromPretrained(
         model: WhisperModel = .largeTurbo,
         options: ModelLoadingOptions,

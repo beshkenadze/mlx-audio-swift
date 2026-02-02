@@ -58,6 +58,8 @@ struct STTDemo {
         var language: String?
         var fast: Bool = false
         var verbose: Bool = false
+        var repoId: String?
+        var tokenizerRepoId: String?
 
         static let autoThresholdSeconds: Double = 30.0
     }
@@ -103,26 +105,65 @@ struct STTDemo {
                 terminal.output("Strategy: ".consoleText(.info) + config.strategy.rawValue.consoleText())
             }
 
+            if let repoId = config.repoId {
+                terminal.output("Repo: ".consoleText(.info) + repoId.consoleText())
+                if let tokenizerRepoId = config.tokenizerRepoId {
+                    terminal.output("Tokenizer: ".consoleText(.info) + tokenizerRepoId.consoleText())
+                }
+                if config.fast {
+                    terminal.output("Note: --fast ignored when using --repo".consoleText(.plain))
+                }
+            }
+
             let loadingMode = config.fast ? "int4 quantized" : "float16"
             terminal.output("")
             terminal.output(
                 "Loading ".consoleText() +
                 config.modelName.consoleText(.info) +
-                " model (\(loadingMode))...".consoleText()
+                (config.repoId != nil ? " model (custom repo)..." : " model (\(loadingMode))...").consoleText()
             )
 
             switch effectiveMode {
             case .short:
-                try await transcribeShort(audio: audio, model: model, language: config.language, fast: config.fast)
+                if let repoId = config.repoId {
+                    let session = try await WhisperSession.fromRepo(
+                        repoId: repoId,
+                        model: model,
+                        tokenizerRepoId: config.tokenizerRepoId,
+                        progressHandler: createProgressHandler()
+                    )
+                    try await transcribeShortWithSession(audio: audio, session: session)
+                } else {
+                    try await transcribeShort(audio: audio, model: model, language: config.language, fast: config.fast)
+                }
             case .long, .auto:
-                try await transcribeLong(
-                    audio: audio,
-                    model: model,
-                    strategy: config.strategy,
-                    language: config.language,
-                    fast: config.fast,
-                    verbose: config.verbose
-                )
+                if let repoId = config.repoId {
+                    let session = try await WhisperSession.fromRepo(
+                        repoId: repoId,
+                        model: model,
+                        tokenizerRepoId: config.tokenizerRepoId,
+                        progressHandler: createProgressHandler()
+                    )
+                    let processor = LongAudioProcessor.create(
+                        session: session,
+                        strategy: config.strategy.toLongAudioStrategy()
+                    )
+                    try await transcribeLongWithProcessor(
+                        audio: audio,
+                        processor: processor,
+                        language: config.language,
+                        verbose: config.verbose
+                    )
+                } else {
+                    try await transcribeLong(
+                        audio: audio,
+                        model: model,
+                        strategy: config.strategy,
+                        language: config.language,
+                        fast: config.fast,
+                        verbose: config.verbose
+                    )
+                }
             }
 
         } catch {
@@ -151,6 +192,10 @@ struct STTDemo {
             _ = try await session.waitUntilReady()
         }
 
+        try await transcribeShortWithSession(audio: audio, session: session)
+    }
+
+    static func transcribeShortWithSession(audio: MLXArray, session: WhisperSession) async throws {
         terminal.output("")
         terminal.output("Transcribing...".consoleText(.info))
         terminal.output("─────────────────────────────────────────".consoleText(.plain))
@@ -214,6 +259,20 @@ struct STTDemo {
             _ = try await processor.waitUntilReady()
         }
 
+        try await transcribeLongWithProcessor(
+            audio: audio,
+            processor: processor,
+            language: language,
+            verbose: verbose
+        )
+    }
+
+    static func transcribeLongWithProcessor(
+        audio: MLXArray,
+        processor: LongAudioProcessor,
+        language: String?,
+        verbose: Bool
+    ) async throws {
         var transcriptionOptions = TranscriptionOptions.default
         transcriptionOptions.language = language
 
@@ -353,6 +412,22 @@ struct STTDemo {
             case "--verbose", "-v":
                 config.verbose = true
 
+            case "--repo":
+                guard i + 1 < args.count else {
+                    print("Error: --repo requires a HuggingFace repo ID")
+                    return nil
+                }
+                i += 1
+                config.repoId = args[i]
+
+            case "--tokenizer-repo":
+                guard i + 1 < args.count else {
+                    print("Error: --tokenizer-repo requires a HuggingFace repo ID")
+                    return nil
+                }
+                i += 1
+                config.tokenizerRepoId = args[i]
+
             default:
                 // Positional argument: treat first as audio path, second as model
                 if config.audioPath.isEmpty {
@@ -370,6 +445,12 @@ struct STTDemo {
 
         if config.audioPath.isEmpty {
             print("Error: Audio file path is required")
+            printUsage()
+            return nil
+        }
+
+        if config.repoId == nil, config.tokenizerRepoId != nil {
+            print("Error: --tokenizer-repo requires --repo")
             printUsage()
             return nil
         }
@@ -393,6 +474,8 @@ struct STTDemo {
           --model, -m <model>     Model size: tiny, base, small, medium, largeV3, largeTurbo
           --fast, -f              Use fast loading (int4 quantization + background init)
           --verbose, -v           Show streaming text output (word-by-word for long audio)
+          --repo <id>             Custom HuggingFace repo ID for model weights
+          --tokenizer-repo <id>   Optional tokenizer repo override
           --mode <mode>           Processing mode:
                                     short  - Use WhisperSession directly (for audio <30s)
                                     long   - Use LongAudioProcessor with chunking
