@@ -1,2 +1,2 @@
 #include "Base.xcconfig"
-#include "Local.xcconfig" // Optional; create from template to override bundle ID + team.
+#include "Local.xcconfig"
