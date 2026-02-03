@@ -341,8 +341,6 @@ public final class PocketTTSModel: Module, SpeechGenerationModel, @unchecked Sen
         eval(model)
         return model
     }
-
-    // No sanitization required for pre-converted weights.
 }
 
 private func resolveOrDownloadPocketTTSModel(
