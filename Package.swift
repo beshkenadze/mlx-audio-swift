@@ -23,17 +23,24 @@ let package = Package(
         // Speech-to-Speech
         .library(name: "MLXAudioSTS", targets: ["MLXAudioSTS"]),
 
+        // Speech Enhancement
+        .library(name: "MLXAudioEnhancement", targets: ["MLXAudioEnhancement"]),
+
         // SwiftUI components
         .library(name: "MLXAudioUI", targets: ["MLXAudioUI"]),
 
         // Legacy combined library (for backwards compatibility)
         .library(
             name: "MLXAudio",
-            targets: ["MLXAudioCore", "MLXAudioCodecs", "MLXAudioTTS", "MLXAudioSTT", "MLXAudioVAD", "MLXAudioSTS", "MLXAudioUI"]
+            targets: ["MLXAudioCore", "MLXAudioCodecs", "MLXAudioTTS", "MLXAudioSTT", "MLXAudioVAD", "MLXAudioSTS", "MLXAudioEnhancement", "MLXAudioUI"]
         ),
         .executable(
             name: "mlx-audio-swift-tts",
             targets: ["mlx-audio-swift-tts"],
+        ),
+        .executable(
+            name: "mlx-audio-swift-se",
+            targets: ["mlx-audio-swift-se"],
         ),
     ],
     dependencies: [
@@ -127,6 +134,19 @@ let package = Package(
             path: "Sources/MLXAudioSTS"
         ),
 
+        // MARK: - MLXAudioEnhancement
+        .target(
+            name: "MLXAudioEnhancement",
+            dependencies: [
+                "MLXAudioCore",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+            ],
+            path: "Sources/MLXAudioEnhancement"
+        ),
+
         // MARK: - MLXAudioUI
         .target(
             name: "MLXAudioUI",
@@ -144,6 +164,12 @@ let package = Package(
             path: "Sources/mlx-audio-swift-tts"
         ),
 
+        .executableTarget(
+            name: "mlx-audio-swift-se",
+            dependencies: ["MLXAudioCore", "MLXAudioEnhancement"],
+            path: "Sources/mlx-audio-swift-se"
+        ),
+
         // MARK: - Tests
         .testTarget(
             name: "MLXAudioTests",
@@ -154,6 +180,7 @@ let package = Package(
                 "MLXAudioSTT",
                 "MLXAudioVAD",
                 "MLXAudioSTS",
+                "MLXAudioEnhancement",
             ],
             path: "Tests",
             resources: [
