@@ -18,10 +18,10 @@ class STTViewModel {
     var peakMemory: Double = 0
 
     // Generation parameters
-    var maxTokens: Int = 8192
+    var maxTokens: Int = 1024
     var temperature: Float = 0.0
     var language: String = "English"
-    var chunkDuration: Float = 250.0
+    var chunkDuration: Float = 30.0
 
     // Model configuration
     var modelId: String = "mlx-community/Qwen3-ASR-0.6B-4bit"
