@@ -539,7 +539,7 @@ struct SortformerInferenceTests {
         let model = try await SortformerModel.fromPretrained("mlx-community/diar_streaming_sortformer_4spk-v2.1-fp16")
         print("\u{001B}[32mSortformer model loaded!\u{001B}[0m")
 
-        let output = model.generate(audio: audioData, verbose: true)
+        let output = try await model.generate(audio: audioData, verbose: true)
 
         print("\u{001B}[32mSortformer Output:\u{001B}[0m")
         print("\u{001B}[36m\(output.text)\u{001B}[0m")
@@ -617,7 +617,7 @@ struct SortformerInferenceTests {
             let end = min(start + chunkSize, audio.dim(0))
             let chunk = audio[start..<end]
 
-            let (result, newState) = model.feed(
+            let (result, newState) = try await model.feed(
                 chunk: chunk,
                 state: state,
                 threshold: 0.5

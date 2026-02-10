@@ -5,6 +5,11 @@ import MLXNN
 import MLXLMCommon
 import Hub
 
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 // MARK: - FastConformer Encoder Components
 
 /// Depthwise-striding convolutional subsampling (factor=8).
@@ -562,79 +567,87 @@ public class SortformerModel: Module {
         minDuration: Float = 0.0,
         mergeGap: Float = 0.0,
         verbose: Bool = false
-    ) -> DiarizationOutput {
-        let startTime = CFAbsoluteTimeGetCurrent()
-        let proc = config.processorConfig
+    ) async throws -> DiarizationOutput {
+        let sendableModel = UncheckedSendableBox(self)
+        let sendableAudio = UncheckedSendableBox(audio)
+        return try await withCheckedThrowingContinuation { continuation in
+            Task.detached {
+                let model = sendableModel.value
+                let audio = sendableAudio.value
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let proc = model.config.processorConfig
 
-        var waveform = audio.asType(.float32)
-        if waveform.ndim > 1 {
-            waveform = MLX.mean(waveform, axis: -1)
-        }
+                var waveform = audio.asType(.float32)
+                if waveform.ndim > 1 {
+                    waveform = MLX.mean(waveform, axis: -1)
+                }
 
-        let (trimmed, trimOffset) = trimSilence(waveform, sampleRate: proc.samplingRate)
-        waveform = trimmed
-        let trimOffsetSec = Float(trimOffset) / Float(proc.samplingRate)
+                let (trimmed, trimOffset) = trimSilence(waveform, sampleRate: proc.samplingRate)
+                waveform = trimmed
+                let trimOffsetSec = Float(trimOffset) / Float(proc.samplingRate)
 
-        // Peak normalize
-        waveform = (1.0 / (MLX.abs(waveform).max() + 1e-3)) * waveform
+                // Peak normalize
+                waveform = (1.0 / (MLX.abs(waveform).max() + 1e-3)) * waveform
 
-        let features = extractMelFeatures(
-            waveform,
-            sampleRate: proc.samplingRate,
-            nFft: proc.nFft,
-            hopLength: proc.hopLength,
-            winLength: proc.winLength,
-            nMels: proc.featureSize,
-            preemphasisCoeff: proc.preemphasis
-        )
-        let featureLengths = MLXArray([Int32(features.dim(2))])
-
-        if verbose {
-            print("Audio: \(String(format: "%.2f", Float(waveform.dim(0)) / Float(proc.samplingRate)))s")
-            if trimOffset > 0 {
-                print("Trimmed \(String(format: "%.2f", trimOffsetSec))s leading silence")
-            }
-            print("Features: \(features.shape)")
-        }
-
-        let preds = self(features, audioSignalLength: featureLengths)
-        eval(preds)
-
-        let subsamplingFactor = config.fcEncoderConfig.subsamplingFactor
-        let frameDuration = Float(proc.hopLength * subsamplingFactor) / Float(proc.samplingRate)
-
-        var segments = Self.predsToSegments(
-            preds[0],
-            frameDuration: frameDuration,
-            threshold: threshold,
-            minDuration: minDuration,
-            mergeGap: mergeGap
-        )
-
-        if trimOffset > 0 {
-            segments = segments.map {
-                DiarizationSegment(
-                    start: $0.start + trimOffsetSec,
-                    end: $0.end + trimOffsetSec,
-                    speaker: $0.speaker
+                let features = extractMelFeatures(
+                    waveform,
+                    sampleRate: proc.samplingRate,
+                    nFft: proc.nFft,
+                    hopLength: proc.hopLength,
+                    winLength: proc.winLength,
+                    nMels: proc.featureSize,
+                    preemphasisCoeff: proc.preemphasis
                 )
+                let featureLengths = MLXArray([Int32(features.dim(2))])
+
+                if verbose {
+                    print("Audio: \(String(format: "%.2f", Float(waveform.dim(0)) / Float(proc.samplingRate)))s")
+                    if trimOffset > 0 {
+                        print("Trimmed \(String(format: "%.2f", trimOffsetSec))s leading silence")
+                    }
+                    print("Features: \(features.shape)")
+                }
+
+                let preds = model(features, audioSignalLength: featureLengths)
+                eval(preds)
+
+                let subsamplingFactor = model.config.fcEncoderConfig.subsamplingFactor
+                let frameDuration = Float(proc.hopLength * subsamplingFactor) / Float(proc.samplingRate)
+
+                var segments = Self.predsToSegments(
+                    preds[0],
+                    frameDuration: frameDuration,
+                    threshold: threshold,
+                    minDuration: minDuration,
+                    mergeGap: mergeGap
+                )
+
+                if trimOffset > 0 {
+                    segments = segments.map {
+                        DiarizationSegment(
+                            start: $0.start + trimOffsetSec,
+                            end: $0.end + trimOffsetSec,
+                            speaker: $0.speaker
+                        )
+                    }
+                }
+
+                let activeSpeakers = Set(segments.map { $0.speaker })
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+
+                if verbose {
+                    print("Found \(segments.count) segments with \(activeSpeakers.count) speakers")
+                    print("Processing time: \(String(format: "%.2f", elapsed))s")
+                }
+
+                continuation.resume(returning: DiarizationOutput(
+                    segments: segments,
+                    speakerProbs: preds[0],
+                    numSpeakers: activeSpeakers.count,
+                    totalTime: elapsed
+                ))
             }
         }
-
-        let activeSpeakers = Set(segments.map { $0.speaker })
-        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-
-        if verbose {
-            print("Found \(segments.count) segments with \(activeSpeakers.count) speakers")
-            print("Processing time: \(String(format: "%.2f", elapsed))s")
-        }
-
-        return DiarizationOutput(
-            segments: segments,
-            speakerProbs: preds[0],
-            numSpeakers: activeSpeakers.count,
-            totalTime: elapsed
-        )
     }
 
     // MARK: - Streaming API
@@ -739,72 +752,82 @@ public class SortformerModel: Module {
         mergeGap: Float = 0.0,
         spkcacheMax: Int = 188,
         fifoMax: Int = 188
-    ) -> (DiarizationOutput, StreamingState) {
-        let proc = config.processorConfig
-        let subsamplingFactor = config.fcEncoderConfig.subsamplingFactor
-        let frameDuration = Float(proc.hopLength * subsamplingFactor) / Float(proc.samplingRate)
+    ) async throws -> (DiarizationOutput, StreamingState) {
+        let sendableModel = UncheckedSendableBox(self)
+        let sendableChunk = UncheckedSendableBox(chunk)
+        let sendableState = UncheckedSendableBox(state)
+        return try await withCheckedThrowingContinuation { continuation in
+            Task.detached {
+                let model = sendableModel.value
+                let chunk = sendableChunk.value
+                let state = sendableState.value
+                let proc = model.config.processorConfig
+                let subsamplingFactor = model.config.fcEncoderConfig.subsamplingFactor
+                let frameDuration = Float(proc.hopLength * subsamplingFactor) / Float(proc.samplingRate)
 
-        var chunkMx = chunk.asType(.float32)
-        if chunkMx.ndim > 1 {
-            chunkMx = MLX.mean(chunkMx, axis: -1)
+                var chunkMx = chunk.asType(.float32)
+                if chunkMx.ndim > 1 {
+                    chunkMx = MLX.mean(chunkMx, axis: -1)
+                }
+
+                let chunkTimeOffset = Float(state.framesProcessed) * frameDuration
+
+                let useV2Feats = model.config.modulesConfig.useAosc
+                if !useV2Feats {
+                    chunkMx = (1.0 / (MLX.abs(chunkMx).max() + 1e-3)) * chunkMx
+                }
+
+                let features = extractMelFeatures(
+                    chunkMx,
+                    sampleRate: proc.samplingRate,
+                    nFft: proc.nFft,
+                    hopLength: proc.hopLength,
+                    winLength: proc.winLength,
+                    nMels: proc.featureSize,
+                    preemphasisCoeff: proc.preemphasis,
+                    normalize: useV2Feats ? nil : "per_feature",
+                    padTo: 0
+                )
+                let featureLengths = MLXArray([Int32(features.dim(2))])
+
+                var (chunkPreds, newState) = model.streamingStep(
+                    chunkFeatures: features,
+                    chunkLength: featureLengths,
+                    state: state
+                )
+
+                var segments = Self.predsToSegments(
+                    chunkPreds,
+                    frameDuration: frameDuration,
+                    threshold: threshold,
+                    minDuration: minDuration,
+                    mergeGap: mergeGap
+                )
+
+                segments = segments.map {
+                    DiarizationSegment(
+                        start: $0.start + chunkTimeOffset,
+                        end: $0.end + chunkTimeOffset,
+                        speaker: $0.speaker
+                    )
+                }
+
+                newState = Self.maybeCompressState(
+                    newState,
+                    spkcacheMax: spkcacheMax,
+                    fifoMax: fifoMax,
+                    modulesCfg: model.config.modulesConfig
+                )
+
+                let activeSpeakers = Set(segments.map { $0.speaker })
+                let output = DiarizationOutput(
+                    segments: segments,
+                    speakerProbs: chunkPreds,
+                    numSpeakers: activeSpeakers.count
+                )
+                continuation.resume(returning: (output, newState))
+            }
         }
-
-        let chunkTimeOffset = Float(state.framesProcessed) * frameDuration
-
-        let useV2Feats = config.modulesConfig.useAosc
-        if !useV2Feats {
-            chunkMx = (1.0 / (MLX.abs(chunkMx).max() + 1e-3)) * chunkMx
-        }
-
-        let features = extractMelFeatures(
-            chunkMx,
-            sampleRate: proc.samplingRate,
-            nFft: proc.nFft,
-            hopLength: proc.hopLength,
-            winLength: proc.winLength,
-            nMels: proc.featureSize,
-            preemphasisCoeff: proc.preemphasis,
-            normalize: useV2Feats ? nil : "per_feature",
-            padTo: 0
-        )
-        let featureLengths = MLXArray([Int32(features.dim(2))])
-
-        var (chunkPreds, newState) = streamingStep(
-            chunkFeatures: features,
-            chunkLength: featureLengths,
-            state: state
-        )
-
-        var segments = Self.predsToSegments(
-            chunkPreds,
-            frameDuration: frameDuration,
-            threshold: threshold,
-            minDuration: minDuration,
-            mergeGap: mergeGap
-        )
-
-        segments = segments.map {
-            DiarizationSegment(
-                start: $0.start + chunkTimeOffset,
-                end: $0.end + chunkTimeOffset,
-                speaker: $0.speaker
-            )
-        }
-
-        newState = Self.maybeCompressState(
-            newState,
-            spkcacheMax: spkcacheMax,
-            fifoMax: fifoMax,
-            modulesCfg: config.modulesConfig
-        )
-
-        let activeSpeakers = Set(segments.map { $0.speaker })
-        let output = DiarizationOutput(
-            segments: segments,
-            speakerProbs: chunkPreds,
-            numSpeakers: activeSpeakers.count
-        )
-        return (output, newState)
     }
 
     /// Process audio in chunks, yielding diarization results incrementally.
@@ -819,140 +842,148 @@ public class SortformerModel: Module {
         fifoMax: Int = 188,
         verbose: Bool = false
     ) -> AsyncThrowingStream<DiarizationOutput, Error> {
-        AsyncThrowingStream { continuation in
-            let proc = self.config.processorConfig
-            let mc = self.config.modulesConfig
+        let sendableModel = UncheckedSendableBox(self)
+        let sendableAudio = UncheckedSendableBox(audio)
+        return AsyncThrowingStream { continuation in
+            Task.detached {
+                let model = sendableModel.value
+                let audio = sendableAudio.value
+                let proc = model.config.processorConfig
+                let mc = model.config.modulesConfig
 
-            var waveform = audio.asType(.float32)
-            if waveform.ndim > 1 {
-                waveform = MLX.mean(waveform, axis: -1)
-            }
-
-            let useV2Feats = mc.useAosc
-
-            var trimOffsetSec: Float = 0
-            if !useV2Feats {
-                let (trimmed, trimOffset) = trimSilence(waveform, sampleRate: proc.samplingRate)
-                waveform = trimmed
-                trimOffsetSec = Float(trimOffset) / Float(proc.samplingRate)
-                waveform = (1.0 / (MLX.abs(waveform).max() + 1e-3)) * waveform
-            }
-
-            let features = extractMelFeatures(
-                waveform,
-                sampleRate: proc.samplingRate,
-                nFft: proc.nFft,
-                hopLength: proc.hopLength,
-                winLength: proc.winLength,
-                nMels: proc.featureSize,
-                preemphasisCoeff: proc.preemphasis,
-                normalize: useV2Feats ? nil : "per_feature",
-                padTo: useV2Feats ? 0 : 16
-            )
-
-            let totalMelFrames = features.dim(2)
-            let subsamplingFactor = self.config.fcEncoderConfig.subsamplingFactor
-            let frameDuration = Float(proc.hopLength * subsamplingFactor) / Float(proc.samplingRate)
-
-            var chunkMel = Int(round(
-                chunkDuration * Float(proc.samplingRate) / Float(proc.hopLength) / Float(subsamplingFactor)
-            )) * subsamplingFactor
-            chunkMel = max(chunkMel, subsamplingFactor)
-
-            // For v2.1: pre-encode all features for right context
-            let rc = mc.chunkRightContext
-            var allPreEmbs: MLXArray? = nil
-            if useV2Feats && rc > 0 {
-                let (preEmbs, _) = self.fcEncoder.preEncode(features, length: MLXArray([Int32(totalMelFrames)]))
-                eval(preEmbs)
-                allPreEmbs = preEmbs
-            }
-
-            if verbose {
-                let audioDur = Float(waveform.dim(0)) / Float(proc.samplingRate)
-                let nChunks = Int(ceil(Double(totalMelFrames) / Double(chunkMel)))
-                print("Streaming: \(String(format: "%.2f", audioDur))s audio in \(nChunks) chunks (\(String(format: "%.1f", chunkDuration))s each)")
-            }
-
-            var state = self.initStreamingState()
-            var offsetMel = 0
-            var chunkIdx = 0
-            var embOffset = 0
-
-            while offsetMel < totalMelFrames {
-                let endMel = min(offsetMel + chunkMel, totalMelFrames)
-                let chunkFeat = features[0..., 0..., offsetMel..<endMel]
-                let chunkLen = MLXArray([Int32(chunkFeat.dim(2))])
-
-                // Compute right context embeddings for file mode
-                var rightCtx: MLXArray? = nil
-                if let allPreEmbs, rc > 0 {
-                    let chunkMelFrames = chunkFeat.dim(2)
-                    var dLen = Float(chunkMelFrames)
-                    for _ in 0..<3 {
-                        dLen = floor((dLen - 1) / 2) + 1
-                    }
-                    let chunkEmbLen = Int(dLen)
-                    let rcStart = embOffset + chunkEmbLen
-                    let rcEnd = min(rcStart + rc, allPreEmbs.dim(1))
-                    if rcEnd > rcStart {
-                        rightCtx = allPreEmbs[0..., rcStart..<rcEnd, 0...]
-                    }
-                    embOffset += chunkEmbLen
+                var waveform = audio.asType(.float32)
+                if waveform.ndim > 1 {
+                    waveform = MLX.mean(waveform, axis: -1)
                 }
 
-                let (chunkPreds, newState) = self.streamingStep(
-                    chunkFeatures: chunkFeat,
-                    chunkLength: chunkLen,
-                    state: state,
-                    rightContextEmbs: rightCtx
-                )
-                state = newState
+                let useV2Feats = mc.useAosc
 
-                let chunkTimeOffset = Float(offsetMel * proc.hopLength) / Float(proc.samplingRate)
-
-                var segments = Self.predsToSegments(
-                    chunkPreds,
-                    frameDuration: frameDuration,
-                    threshold: threshold,
-                    minDuration: minDuration,
-                    mergeGap: mergeGap
-                )
-
-                segments = segments.map {
-                    DiarizationSegment(
-                        start: $0.start + chunkTimeOffset + trimOffsetSec,
-                        end: $0.end + chunkTimeOffset + trimOffsetSec,
-                        speaker: $0.speaker
-                    )
+                var trimOffsetSec: Float = 0
+                if !useV2Feats {
+                    let (trimmed, trimOffset) = trimSilence(waveform, sampleRate: proc.samplingRate)
+                    waveform = trimmed
+                    trimOffsetSec = Float(trimOffset) / Float(proc.samplingRate)
+                    waveform = (1.0 / (MLX.abs(waveform).max() + 1e-3)) * waveform
                 }
 
-                let activeSpeakers = Set(segments.map { $0.speaker })
+                let features = extractMelFeatures(
+                    waveform,
+                    sampleRate: proc.samplingRate,
+                    nFft: proc.nFft,
+                    hopLength: proc.hopLength,
+                    winLength: proc.winLength,
+                    nMels: proc.featureSize,
+                    preemphasisCoeff: proc.preemphasis,
+                    normalize: useV2Feats ? nil : "per_feature",
+                    padTo: useV2Feats ? 0 : 16
+                )
+
+                let totalMelFrames = features.dim(2)
+                let subsamplingFactor = model.config.fcEncoderConfig.subsamplingFactor
+                let frameDuration = Float(proc.hopLength * subsamplingFactor) / Float(proc.samplingRate)
+
+                var chunkMel = Int(round(
+                    chunkDuration * Float(proc.samplingRate) / Float(proc.hopLength) / Float(subsamplingFactor)
+                )) * subsamplingFactor
+                chunkMel = max(chunkMel, subsamplingFactor)
+
+                // For v2.1: pre-encode all features for right context
+                let rc = mc.chunkRightContext
+                var allPreEmbs: MLXArray? = nil
+                if useV2Feats && rc > 0 {
+                    let (preEmbs, _) = model.fcEncoder.preEncode(features, length: MLXArray([Int32(totalMelFrames)]))
+                    eval(preEmbs)
+                    allPreEmbs = preEmbs
+                }
 
                 if verbose {
-                    chunkIdx += 1
-                    let t0 = chunkTimeOffset + trimOffsetSec
-                    let t1 = t0 + Float(chunkPreds.dim(0)) * frameDuration
-                    print("  Chunk \(chunkIdx): \(String(format: "%.2f", t0))s-\(String(format: "%.2f", t1))s  \(segments.count) segments, context=\(state.spkcacheLen)+\(state.fifoLen) frames")
+                    let audioDur = Float(waveform.dim(0)) / Float(proc.samplingRate)
+                    let nChunks = Int(ceil(Double(totalMelFrames) / Double(chunkMel)))
+                    print("Streaming: \(String(format: "%.2f", audioDur))s audio in \(nChunks) chunks (\(String(format: "%.1f", chunkDuration))s each)")
                 }
 
-                continuation.yield(DiarizationOutput(
-                    segments: segments,
-                    speakerProbs: chunkPreds,
-                    numSpeakers: activeSpeakers.count
-                ))
+                var state = model.initStreamingState()
+                var offsetMel = 0
+                var chunkIdx = 0
+                var embOffset = 0
 
-                state = Self.maybeCompressState(
-                    state,
-                    spkcacheMax: spkcacheMax,
-                    fifoMax: fifoMax,
-                    modulesCfg: self.config.modulesConfig
-                )
+                while offsetMel < totalMelFrames {
+                    try Task.checkCancellation()
 
-                offsetMel = endMel
+                    let endMel = min(offsetMel + chunkMel, totalMelFrames)
+                    let chunkFeat = features[0..., 0..., offsetMel..<endMel]
+                    let chunkLen = MLXArray([Int32(chunkFeat.dim(2))])
+
+                    // Compute right context embeddings for file mode
+                    var rightCtx: MLXArray? = nil
+                    if let allPreEmbs, rc > 0 {
+                        let chunkMelFrames = chunkFeat.dim(2)
+                        var dLen = Float(chunkMelFrames)
+                        for _ in 0..<3 {
+                            dLen = floor((dLen - 1) / 2) + 1
+                        }
+                        let chunkEmbLen = Int(dLen)
+                        let rcStart = embOffset + chunkEmbLen
+                        let rcEnd = min(rcStart + rc, allPreEmbs.dim(1))
+                        if rcEnd > rcStart {
+                            rightCtx = allPreEmbs[0..., rcStart..<rcEnd, 0...]
+                        }
+                        embOffset += chunkEmbLen
+                    }
+
+                    let (chunkPreds, newState) = model.streamingStep(
+                        chunkFeatures: chunkFeat,
+                        chunkLength: chunkLen,
+                        state: state,
+                        rightContextEmbs: rightCtx
+                    )
+                    state = newState
+
+                    let chunkTimeOffset = Float(offsetMel * proc.hopLength) / Float(proc.samplingRate)
+
+                    var segments = Self.predsToSegments(
+                        chunkPreds,
+                        frameDuration: frameDuration,
+                        threshold: threshold,
+                        minDuration: minDuration,
+                        mergeGap: mergeGap
+                    )
+
+                    segments = segments.map {
+                        DiarizationSegment(
+                            start: $0.start + chunkTimeOffset + trimOffsetSec,
+                            end: $0.end + chunkTimeOffset + trimOffsetSec,
+                            speaker: $0.speaker
+                        )
+                    }
+
+                    let activeSpeakers = Set(segments.map { $0.speaker })
+
+                    if verbose {
+                        chunkIdx += 1
+                        let t0 = chunkTimeOffset + trimOffsetSec
+                        let t1 = t0 + Float(chunkPreds.dim(0)) * frameDuration
+                        print("  Chunk \(chunkIdx): \(String(format: "%.2f", t0))s-\(String(format: "%.2f", t1))s  \(segments.count) segments, context=\(state.spkcacheLen)+\(state.fifoLen) frames")
+                    }
+
+                    continuation.yield(DiarizationOutput(
+                        segments: segments,
+                        speakerProbs: chunkPreds,
+                        numSpeakers: activeSpeakers.count
+                    ))
+
+                    state = Self.maybeCompressState(
+                        state,
+                        spkcacheMax: spkcacheMax,
+                        fifoMax: fifoMax,
+                        modulesCfg: model.config.modulesConfig
+                    )
+
+                    offsetMel = endMel
+                }
+
+                continuation.finish()
             }
-
-            continuation.finish()
         }
     }
 

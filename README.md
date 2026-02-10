@@ -89,7 +89,7 @@ let model = try await SortformerModel.fromPretrained(
 )
 
 // Detect who is speaking when
-let output = model.generate(audio: audioData, threshold: 0.5)
+let output = try await model.generate(audio: audioData, threshold: 0.5)
 for segment in output.segments {
     print("Speaker \(segment.speaker): \(segment.start)s - \(segment.end)s")
 }

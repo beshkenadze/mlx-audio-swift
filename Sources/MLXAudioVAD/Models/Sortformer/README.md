@@ -20,7 +20,7 @@ let model = try await SortformerModel.fromPretrained(
     "mlx-community/diar_streaming_sortformer_4spk-v2.1-fp16"
 )
 
-let result = model.generate(audio: audioData, threshold: 0.5, verbose: true)
+let result = try await model.generate(audio: audioData, threshold: 0.5, verbose: true)
 print(result.text)
 ```
 
@@ -31,7 +31,7 @@ print(result.text)
 Offline inference on a full audio file.
 
 ```swift
-let result = model.generate(
+let result = try await model.generate(
     audio: audioData,         // MLXArray — 1-D audio samples
     sampleRate: 16000,        // sample rate of input audio
     threshold: 0.5,           // speaker activity threshold (0–1)
@@ -75,7 +75,7 @@ Low-level single-chunk API for real-time streaming.
 
 ```swift
 var state = model.initStreamingState()
-let (result, state) = model.feed(
+let (result, state) = try await model.feed(
     chunk: audioChunk,        // MLXArray — 1-D audio samples
     state: state,             // StreamingState
     sampleRate: 16000,
@@ -97,7 +97,7 @@ let (_, audio) = try loadAudioArray(from: audioURL)
 let model = try await SortformerModel.fromPretrained(
     "mlx-community/diar_streaming_sortformer_4spk-v2.1-fp16"
 )
-let result = model.generate(audio: audio, threshold: 0.5)
+let result = try await model.generate(audio: audio, threshold: 0.5)
 
 for seg in result.segments {
     print("Speaker \(seg.speaker): \(seg.start)s - \(seg.end)s")
@@ -107,7 +107,7 @@ for seg in result.segments {
 ### With post-processing
 
 ```swift
-let result = model.generate(
+let result = try await model.generate(
     audio: audio,
     threshold: 0.4,
     minDuration: 0.25,   // ignore segments shorter than 250ms
@@ -139,7 +139,7 @@ for start in stride(from: 0, to: audio.dim(0), by: chunkSize) {
     let end = min(start + chunkSize, audio.dim(0))
     let chunk = audio[start..<end]
 
-    let (result, newState) = model.feed(
+    let (result, newState) = try await model.feed(
         chunk: chunk,
         state: state,
         threshold: 0.5
@@ -158,7 +158,7 @@ for start in stride(from: 0, to: audio.dim(0), by: chunkSize) {
 var state = model.initStreamingState()
 
 for try await chunk in microphoneStream {
-    let (result, newState) = model.feed(
+    let (result, newState) = try await model.feed(
         chunk: chunk,
         state: state,
         threshold: 0.5
@@ -174,7 +174,7 @@ for try await chunk in microphoneStream {
 ### RTTM output
 
 ```swift
-let result = model.generate(audio: audio, threshold: 0.5)
+let result = try await model.generate(audio: audio, threshold: 0.5)
 print(result.text)
 // SPEAKER audio 1 0.000 3.200 <NA> <NA> speaker_0 <NA> <NA>
 // SPEAKER audio 1 3.520 5.120 <NA> <NA> speaker_1 <NA> <NA>
