@@ -50,6 +50,10 @@ let package = Package(
             name: "mlx-audio-swift-stt",
             targets: ["mlx-audio-swift-stt"],
         ),
+        .executable(
+            name: "mlx-audio-swift-lid",
+            targets: ["mlx-audio-swift-lid"],
+        ),
 
     ],
     dependencies: [
@@ -194,6 +198,11 @@ let package = Package(
             dependencies: ["MLXAudioCore", "MLXAudioSTT"],
             path: "Sources/Tools/mlx-audio-swift-stt"
         ),
+        .executableTarget(
+            name: "mlx-audio-swift-lid",
+            dependencies: ["MLXAudioCore", "MLXAudioLID"],
+            path: "Sources/Tools/mlx-audio-swift-lid"
+        ),
 
         // MARK: - Tests
         .testTarget(
@@ -206,6 +215,7 @@ let package = Package(
                 "MLXAudioVAD",
                 "MLXAudioSTS",
                 "MLXAudioLID",
+                "mlx-audio-swift-lid",
             ],
             path: "Tests",
             resources: [

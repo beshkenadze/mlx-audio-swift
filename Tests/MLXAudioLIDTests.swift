@@ -5,6 +5,7 @@ import MLXNN
 import MLXAudioCore
 
 @testable import MLXAudioLID
+@testable import mlx_audio_swift_lid
 
 // MARK: - Configuration Tests
 
@@ -105,6 +106,35 @@ struct LIDOutputTests {
 
         let err3 = LIDError.weightsNotFound
         #expect(err3.localizedDescription.contains("safetensors"))
+    }
+}
+
+struct LIDCLITests {
+
+    @Test func cliUsesEcapaDefaultModel() throws {
+        let cli = try CLI.parse(["--audio", "sample.wav"])
+        #expect(cli.audioPath == "sample.wav")
+        #expect(cli.model == "beshkenadze/lang-id-voxlingua107-ecapa-mlx")
+        #expect(cli.topK == 5)
+        #expect(cli.outputPath == nil)
+    }
+
+    @Test func cliParsesOptionalValues() throws {
+        let cli = try CLI.parse([
+            "--audio", "sample.wav",
+            "--model", "facebook/mms-lid-256",
+            "--top-k", "3",
+            "--output-path", "lid.json",
+        ])
+        #expect(cli.model == "facebook/mms-lid-256")
+        #expect(cli.topK == 3)
+        #expect(cli.outputPath == "lid.json")
+    }
+
+    @Test func cliRequiresAudio() {
+        #expect(throws: CLIError.self) {
+            try CLI.parse([])
+        }
     }
 }
 
