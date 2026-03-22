@@ -35,6 +35,11 @@ Swift Testing uses **struct names**, not file names, for `-only-testing:`.
 CI must use real struct names (e.g., `MLXAudioTests/SharedDSPTests`) or
 run all tests without `-only-testing:` filter.
 
+**ALWAYS skip SmokeTests in CI** — they download multi-GB models and run
+inference, which exceeds the CI runner memory limit (OOM → runner crash).
+Use `-skip-testing:'MLXAudioTests/SmokeTests'`. SmokeTests are designed
+for local runs only (see `Tests/MLXAudioSmokeTests.swift` header).
+
 ## Testing Framework
 
 Tests use **Swift Testing** (`import Testing`), NOT XCTest.
