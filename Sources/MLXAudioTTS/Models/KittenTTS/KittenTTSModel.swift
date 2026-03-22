@@ -99,7 +99,7 @@ public final class KittenTTSModel: Module, SpeechGenerationModel, @unchecked Sen
         language: String?,
         generationParameters: GenerateParameters
     ) async throws -> MLXArray {
-        let (inputIds, refS, speed) = try prepareInputs(text: text, voice: voice)
+        let (inputIds, refS, speed) = try prepareInputs(text: text, voice: voice, language: language)
         let (audio, _) = self.callAsFunction(inputIds: inputIds, refS: refS, speed: speed)
         return audio.reshaped([-1])
     }
@@ -114,7 +114,7 @@ public final class KittenTTSModel: Module, SpeechGenerationModel, @unchecked Sen
     ) -> AsyncThrowingStream<AudioGeneration, Error> {
         AsyncThrowingStream { continuation in
             do {
-                let (inputIds, refS, speed) = try self.prepareInputs(text: text, voice: voice)
+                let (inputIds, refS, speed) = try self.prepareInputs(text: text, voice: voice, language: language)
                 let (audio, _) = self.callAsFunction(inputIds: inputIds, refS: refS, speed: speed)
                 continuation.yield(.audio(audio.reshaped([-1])))
                 continuation.finish()
@@ -126,7 +126,7 @@ public final class KittenTTSModel: Module, SpeechGenerationModel, @unchecked Sen
 
     // MARK: - Text Processing
 
-    private func prepareInputs(text: String, voice: String?, speed: Float = 1.0) throws -> (MLXArray, MLXArray, Float) {
+    private func prepareInputs(text: String, voice: String?, language: String? = nil, speed: Float = 1.0) throws -> (MLXArray, MLXArray, Float) {
         var voiceKey = voice ?? "expr-voice-5-m"
         if let alias = config.voiceAliases?[voiceKey] {
             voiceKey = alias
@@ -141,7 +141,7 @@ public final class KittenTTSModel: Module, SpeechGenerationModel, @unchecked Sen
             adjustedSpeed *= prior
         }
 
-        let tokens = try phonemize(text)
+        let tokens = try phonemize(text, language: language)
         var tokenArray = [Int32(0)]
         tokenArray.append(contentsOf: tokens.map { Int32($0) })
         tokenArray.append(0)
