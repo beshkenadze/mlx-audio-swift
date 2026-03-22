@@ -32,10 +32,13 @@ let package = Package(
         // Shared NN building blocks (Conv, LSTM, normalization, residual blocks)
         .library(name: "MLXAudioModules", targets: ["MLXAudioModules"]),
 
+        // Grapheme-to-phoneme (text-only, MIT clean-room)
+        .library(name: "MLXAudioG2P", targets: ["MLXAudioG2P"]),
+
         // Legacy combined library (for backwards compatibility)
         .library(
             name: "MLXAudio",
-            targets: ["MLXAudioCore", "MLXAudioCodecs", "MLXAudioTTS", "MLXAudioSTT", "MLXAudioVAD", "MLXAudioLID", "MLXAudioSTS", "MLXAudioUI", "MLXAudioModules"]
+            targets: ["MLXAudioCore", "MLXAudioCodecs", "MLXAudioTTS", "MLXAudioSTT", "MLXAudioVAD", "MLXAudioLID", "MLXAudioSTS", "MLXAudioUI", "MLXAudioModules", "MLXAudioG2P"]
         ),
         .executable(
             name: "mlx-audio-swift-tts",
@@ -191,6 +194,16 @@ let package = Package(
             ],
             path: "Sources/MLXAudioModules"
         ),
+
+        // MARK: - MLXAudioG2P
+        .target(
+            name: "MLXAudioG2P",
+            dependencies: [],
+            path: "Sources/MLXAudioG2P",
+            resources: [
+                .copy("Resources/CMUdict"),
+            ]
+        ),
         
         .executableTarget(
             name: "mlx-audio-swift-tts",
@@ -229,6 +242,7 @@ let package = Package(
                 "MLXAudioVAD",
                 "MLXAudioSTS",
                 "MLXAudioLID",
+                "MLXAudioG2P",
                 "mlx-audio-swift-lid",
             ],
             path: "Tests",
