@@ -345,11 +345,11 @@ public enum LexiconError: Error, LocalizedError {
         case .unsupportedLanguage(let lang):
             return "Unsupported language: \(lang). Available: es, fr, it, pt, de, ru, ar, cs, fa, nl, sv, sw, ja, hi, cmn"
         case .lexiconNotFound(let file):
-            return "Lexicon file not found: \(file). Try calling downloadLexicons() first."
+            return "Lexicon file not found: \(file). Call prepare(for:) before processing text."
         case .lexiconNotDownloaded(let repo):
-            return "Lexicons not downloaded. Call downloadLexicons() or run: huggingface-cli download \(repo)"
+            return "Lexicons not downloaded. Call prepare(for:) or run: huggingface-cli download \(repo)"
         case .neuralModelNotDownloaded(let repo):
-            return "Neural G2P model not downloaded. Run: huggingface-cli download \(repo)"
+            return "Neural G2P model not downloaded. Call prepare(for:) or run: huggingface-cli download \(repo)"
         case .invalidRepo(let repo):
             return "Invalid HuggingFace repo: \(repo)"
         }
