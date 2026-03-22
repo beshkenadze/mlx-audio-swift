@@ -18,6 +18,7 @@ MLXAudio follows a modular design allowing you to import only what you need:
 - **MLXAudioSTT**: Speech-to-Text models (Qwen3-ASR, Voxtral Realtime, Parakeet, GLMASR)
 - **MLXAudioVAD**: Voice Activity Detection & Speaker Diarization (Sortformer, SmartTurn)
 - **MLXAudioSTS**: Speech-to-Speech models (LFM2.5-Audio, SAM-Audio, MossFormer2-SE)
+- **MLXAudioG2P**: Grapheme-to-phoneme text pipeline (clean-room MIT, no upstream code port)
 - **MLXAudioUI**: SwiftUI components for audio interfaces
 
 ## Installation
@@ -31,6 +32,7 @@ dependencies: [
 
 // Import only what you need
 .product(name: "MLXAudioTTS", package: "mlx-audio-swift"),
+.product(name: "MLXAudioG2P", package: "mlx-audio-swift"),
 .product(name: "MLXAudioCore", package: "mlx-audio-swift")
 ```
 
