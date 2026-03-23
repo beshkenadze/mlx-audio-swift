@@ -37,12 +37,12 @@ public final class MisakiTextProcessor: TextProcessor, @unchecked Sendable {
         }
         if british {
             if let cached = gbG2P { return cached }
-            let g2p = EnglishG2P(british: true, directory: dir)
+            let g2p = try EnglishG2P(british: true, directory: dir)
             gbG2P = g2p
             return g2p
         } else {
             if let cached = usG2P { return cached }
-            let g2p = EnglishG2P(british: false, directory: dir)
+            let g2p = try EnglishG2P(british: false, directory: dir)
             usG2P = g2p
             return g2p
         }

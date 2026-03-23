@@ -12,12 +12,24 @@ final class EnglishFallbackNetwork {
 
     private let british: Bool
 
-    init(british: Bool, directory: URL) {
+    enum LoadError: Error, LocalizedError {
+        case configNotFound(URL)
+        case weightsNotFound(URL)
+
+        var errorDescription: String? {
+            switch self {
+            case .configNotFound(let url): return "BART G2P config not found at \(url.path)"
+            case .weightsNotFound(let url): return "BART G2P weights not found at \(url.path)"
+            }
+        }
+    }
+
+    init(british: Bool, directory: URL) throws {
         guard let config = EnglishFallbackNetwork.loadConfig(british: british, directory: directory) else {
-            fatalError("Failed to load BART G2P config from \(directory.path)")
+            throw LoadError.configNotFound(directory)
         }
         guard let weights = EnglishFallbackNetwork.loadWeights(british: british, directory: directory) else {
-            fatalError("Failed to load BART G2P weights from \(directory.path)")
+            throw LoadError.weightsNotFound(directory)
         }
         configuration = config
         modelWeights = weights

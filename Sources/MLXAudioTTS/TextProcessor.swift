@@ -17,6 +17,12 @@ import Foundation
 /// }
 /// ```
 public protocol TextProcessor: Sendable {
+    /// Download or initialize any resources needed before processing.
+    ///
+    /// Call this before `process(text:language:)` to ensure the processor is ready.
+    /// The default implementation is a no-op for processors that don't need preparation.
+    func prepare() async throws
+
     /// Convert input text into the format expected by the target model.
     ///
     /// - Parameters:
@@ -24,4 +30,9 @@ public protocol TextProcessor: Sendable {
     ///   - language: Optional language code (e.g., "en-us", "en-gb").
     /// - Returns: Processed text string suitable for the target model.
     func process(text: String, language: String?) throws -> String
+}
+
+extension TextProcessor {
+    /// Default no-op implementation for processors that don't need preparation.
+    public func prepare() async throws {}
 }

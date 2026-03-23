@@ -43,11 +43,11 @@ final class EnglishG2P {
     let tokenRange: Range<String.Index>
   }
 
-  init(british: Bool = false, unk: String = "❓", directory: URL) {
+  init(british: Bool = false, unk: String = "❓", directory: URL) throws {
     self.british = british
     self.tagger = NLTagger(tagSchemes: [.nameTypeOrLexicalClass])
     self.lexicon = Lexicon(british: british, directory: directory)
-    self.fallback = EnglishFallbackNetwork(british: british, directory: directory)
+    self.fallback = try EnglishFallbackNetwork(british: british, directory: directory)
     self.unk = unk
     self.directory = directory
   }
