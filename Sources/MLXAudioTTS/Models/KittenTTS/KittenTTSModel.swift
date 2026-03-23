@@ -142,6 +142,9 @@ public final class KittenTTSModel: Module, SpeechGenerationModel, @unchecked Sen
         }
 
         let tokens = try phonemize(text, language: language)
+        guard !tokens.isEmpty else {
+            throw AudioGenerationError.invalidInput("No valid phoneme tokens produced from input text")
+        }
         var tokenArray = [Int32(0)]
         tokenArray.append(contentsOf: tokens.map { Int32($0) })
         tokenArray.append(0)
@@ -207,6 +210,8 @@ public final class KittenTTSModel: Module, SpeechGenerationModel, @unchecked Sen
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: .noUnusedKeys)
 
         try model.loadVoices(modelDir: modelDir)
+
+        try await model.textProcessor?.prepare()
 
         model.train(false)
         MLX.eval(model.parameters())
