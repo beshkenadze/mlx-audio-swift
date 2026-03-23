@@ -17,17 +17,8 @@
 
 import Testing
 import MLX
-import Metal
 import MLXLMCommon
 import Foundation
-
-private let metalAvailable: Bool = {
-    #if canImport(Metal)
-    return MTLCreateSystemDefaultDevice() != nil
-    #else
-    return false
-    #endif
-}()
 
 @testable import MLXAudioCore
 @testable import MLXAudioTTS
