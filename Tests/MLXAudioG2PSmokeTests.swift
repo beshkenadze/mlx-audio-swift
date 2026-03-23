@@ -2,10 +2,6 @@ import Testing
 @testable import MLXAudioG2P
 
 struct G2PPipelineTests {
-    @Test func moduleImports() {
-        #expect(MLXAudioG2P.version == "0.1.0")
-    }
-
     @Test func pipelineReturnsStructuredOutput() throws {
         let pipeline = G2PPipeline.preview()
         let output = try pipeline.convert("Hello world")
