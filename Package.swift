@@ -32,10 +32,13 @@ let package = Package(
         // Grapheme-to-Phoneme
         .library(name: "MLXAudioG2P", targets: ["MLXAudioG2P"]),
 
+        // Neural Grapheme-to-Phoneme (ByT5 multilingual)
+        .library(name: "MLXAudioNeuralG2P", targets: ["MLXAudioNeuralG2P"]),
+
         // Legacy combined library (for backwards compatibility)
         .library(
             name: "MLXAudio",
-            targets: ["MLXAudioCore", "MLXAudioCodecs", "MLXAudioTTS", "MLXAudioSTT", "MLXAudioVAD", "MLXAudioLID", "MLXAudioSTS", "MLXAudioUI", "MLXAudioG2P"]
+            targets: ["MLXAudioCore", "MLXAudioCodecs", "MLXAudioTTS", "MLXAudioSTT", "MLXAudioVAD", "MLXAudioLID", "MLXAudioSTS", "MLXAudioUI", "MLXAudioG2P", "MLXAudioNeuralG2P"]
         ),
         .executable(
             name: "mlx-audio-swift-tts",
@@ -188,6 +191,19 @@ let package = Package(
             dependencies: [],
             path: "Sources/MLXAudioG2P"
         ),
+
+        // MARK: - MLXAudioNeuralG2P
+        .target(
+            name: "MLXAudioNeuralG2P",
+            dependencies: [
+                "MLXAudioG2P",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXRandom", package: "mlx-swift"),
+            ],
+            path: "Sources/MLXAudioNeuralG2P"
+        ),
         
         .executableTarget(
             name: "mlx-audio-swift-tts",
@@ -227,6 +243,7 @@ let package = Package(
                 "MLXAudioSTS",
                 "MLXAudioLID",
                 "MLXAudioG2P",
+                "MLXAudioNeuralG2P",
                 "mlx-audio-swift-lid",
             ],
             path: "Tests",
