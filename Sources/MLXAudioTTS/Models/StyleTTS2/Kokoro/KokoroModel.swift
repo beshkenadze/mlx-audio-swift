@@ -18,6 +18,7 @@ public final class KokoroModel: Module, SpeechGenerationModel, @unchecked Sendab
 
     private let modelDirectory: URL?
     private var voiceCache: [String: MLXArray] = [:]
+    private let voiceCacheLock = NSLock()
     private let maxTokenCount = 510
     public private(set) var textProcessor: TextProcessor?
 
@@ -187,7 +188,7 @@ public final class KokoroModel: Module, SpeechGenerationModel, @unchecked Sendab
     // MARK: - Voice Loading
 
     public func loadVoice(named name: String) throws -> MLXArray {
-        if let cached = voiceCache[name] { return cached }
+        if let cached = voiceCacheLock.withLock({ voiceCache[name] }) { return cached }
 
         guard let dir = modelDirectory else {
             throw AudioGenerationError.invalidInput("Voice '\(name)' not available: no model directory")
@@ -207,7 +208,7 @@ public final class KokoroModel: Module, SpeechGenerationModel, @unchecked Sendab
 
         var voice = voiceArray.asType(.float32)
         if voice.ndim == 3 { voice = voice.squeezed(axis: 1) }
-        voiceCache[name] = voice
+        voiceCacheLock.withLock { voiceCache[name] = voice }
         return voice
     }
 

@@ -1,7 +1,7 @@
 import Foundation
 import HuggingFace
 import MLXAudioCore
-import MLXAudioNeuralG2P
+import MLXAudioG2P
 
 /// Multilingual TextProcessor for Kokoro TTS.
 ///
@@ -348,9 +348,9 @@ public enum LexiconError: Error, LocalizedError {
         case .lexiconNotFound(let file):
             return "Lexicon file not found: \(file). Call prepare(for:) before processing text."
         case .lexiconNotDownloaded(let repo):
-            return "Lexicons not downloaded. Call prepare(for:) or run: huggingface-cli download \(repo)"
+            return "Lexicons not downloaded. Call prepare(for:) before processing text. Repo: \(repo)"
         case .neuralModelNotDownloaded(let repo):
-            return "Neural G2P model not downloaded. Call prepare(for:) or run: huggingface-cli download \(repo)"
+            return "Neural G2P model not downloaded. Call prepare(for:) before processing text. Repo: \(repo)"
         case .invalidRepo(let repo):
             return "Invalid HuggingFace repo: \(repo)"
         }
