@@ -1126,25 +1126,43 @@ struct KokoroMultilingualProcessorTests {
         #expect(KokoroMultilingualProcessor.languageForVoice("xf_unknown") == nil)
     }
 
-    @Test func processEnglishDelegatesToMisaki() throws {
+    @Test func processEnglishDelegatesToMisaki() async throws {
         guard metalAvailable else { return }
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
         let processor = KokoroMultilingualProcessor()
+        try await processor.prepare()
         let result = try processor.process(text: "hello", language: "en-us")
         #expect(!result.isEmpty)
         #expect(result != "hello")
     }
 
-    @Test func processEnglishGBDelegatesToMisaki() throws {
+    @Test func processEnglishGBDelegatesToMisaki() async throws {
         guard metalAvailable else { return }
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
         let processor = KokoroMultilingualProcessor()
+        try await processor.prepare()
         let result = try processor.process(text: "hello", language: "en-gb")
         #expect(!result.isEmpty)
         #expect(result != "hello")
     }
 
-    @Test func processNilLanguageDefaultsToEnglish() throws {
+    @Test func processNilLanguageDefaultsToEnglish() async throws {
         guard metalAvailable else { return }
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
         let processor = KokoroMultilingualProcessor()
+        try await processor.prepare()
         let result = try processor.process(text: "hello", language: nil)
         #expect(!result.isEmpty)
         #expect(result != "hello")
@@ -1248,15 +1266,26 @@ struct KokoroMultilingualProcessorTests {
         #expect(result.isEmpty)
     }
 
-    @Test func initDefaultRepos() throws {
+    @Test func initDefaultRepos() async throws {
         guard metalAvailable else { return }
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
         let processor = KokoroMultilingualProcessor()
+        try await processor.prepare()
         let result = try processor.process(text: "hello", language: "en-us")
         #expect(!result.isEmpty)
     }
 
     @Test func prepareForEnglishIsNoop() async throws {
         guard metalAvailable else { return }
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
         let processor = KokoroMultilingualProcessor()
         try await processor.prepare(for: "en-us")
         try await processor.prepare(for: "en-gb")
