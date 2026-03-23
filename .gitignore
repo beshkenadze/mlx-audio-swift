@@ -3,6 +3,7 @@
 .DS_Store
 .xcbkptlist
 .claude
+AGENTS.local.md
 Examples/VoicesApp/Config/Local.xcconfig
 xcuserdata/*
 *.pbxproj
