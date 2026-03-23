@@ -1,7 +1,7 @@
 import Testing
 @testable import MLXAudioG2P
 
-struct MLXAudioG2PSmokeTests {
+struct G2PPipelineTests {
     @Test func moduleImports() {
         #expect(MLXAudioG2P.version == "0.1.0")
     }

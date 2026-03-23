@@ -10,9 +10,9 @@ public struct TextNormalizer: Sendable {
     }
 
     public static let englishDefault = TextNormalizer(rules: [
-        .collapseWhitespace,
         .normalizeQuotes,
         .normalizeDashes,
+        .collapseWhitespace,
         .trimWhitespace,
     ])
 }
