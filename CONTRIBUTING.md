@@ -2,16 +2,11 @@
 
 Thanks for contributing to MLX Audio Swift.
 
-## Scope
+We welcome model ports, bug fixes, performance work, and documentation
+improvements.
 
-We welcome:
-- New model ports (TTS, STT, STS, codecs)
-- Bug fixes and performance improvements
-- Documentation and example improvements
-
-For large API changes or new features, **open an issue first** to discuss the
-approach before starting implementation. This avoids wasted effort on PRs that
-won't be accepted.
+For large API changes or new features, open an issue first so the approach can
+be discussed before implementation starts.
 
 ## Reporting Bugs
 
@@ -32,18 +27,15 @@ to report privately.
 ## Development Setup
 
 ```bash
-# Clone your fork
 git clone git@github.com:<you>/mlx-audio-swift.git
 cd mlx-audio-swift
-
-# Open in Xcode or build from CLI
 open Package.swift
 ```
 
 ## Pull Requests
 
 - Open pull requests against `Blaizzy/mlx-audio-swift:main`.
-- If you are contributing from a fork, make sure the base repository is
+- If you are contributing from a fork, make sure the base repo is
   `Blaizzy/mlx-audio-swift` and the base branch is `main`.
 - Keep pull requests focused. Include tests and documentation updates when
   behavior changes.
@@ -51,7 +43,13 @@ open Package.swift
   reviewers evaluate and merge changes faster and with higher confidence.
 - Run local build and test checks before opening a PR.
 
-The current CI workflow on `main` uses `xcodebuild` on macOS:
+If you want to mirror CI more closely, install the Metal toolchain first:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
+```
+
+Then run the usual local checks:
 
 ```bash
 xcodebuild build-for-testing \
@@ -70,9 +68,7 @@ xcodebuild test-without-building \
 
 ## Adding a New Model
 
-See [ADDING_A_MODEL.md](ADDING_A_MODEL.md) for the full guide — module layout,
-required protocols, configuration structs, factory registration, weight loading,
-mlx-community naming convention, tests, and PR checklist.
+See [ADDING_A_MODEL.md](ADDING_A_MODEL.md) for the short checklist.
 
 ## Keeping the repository clean
 
@@ -84,21 +80,6 @@ diff does not include:
 - Local model weights or large binaries
 - Changes to `.gitignore` that only cover your personal setup
 
-**Use a global gitignore for personal patterns** so you never have to touch the
-project's `.gitignore`:
-
-```bash
-# Create (or append to) your global gitignore
-echo "*.local.*" >> ~/.gitignore_global
-echo ".env.local" >> ~/.gitignore_global
-
-# Register it with git (one-time setup)
-git config --global core.excludesFile ~/.gitignore_global
-```
-
-The `*.local.*` pattern (e.g., `notes.local.md`, `config.local.json`) is a
-useful convention for files that should always stay local.
-
 ## Good First Issues
 
 Issues labeled [`good first issue`](https://github.com/Blaizzy/mlx-audio-swift/contribute)
@@ -106,23 +87,18 @@ are a good starting point if you are new to the codebase.
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
-By participating, you agree to uphold it.
+This project follows the [Code of Conduct](CODE_OF_CONDUCT.md). By
+participating, you agree to uphold it.
 
 ## Commit Signing and Account Security
 
-To improve commit provenance and reduce supply chain risk, please sign commits
-submitted to this repository. This is a one-time setup on your machine.
+Please sign commits submitted to this repository.
 
 - Any GitHub-supported signing method is fine: GPG, SSH, or S/MIME.
-- Enable GitHub vigilant mode so commits and tags always show a verification
-  status.
-- Enable two-factor authentication on your GitHub account. Passkeys are
-  preferred when available.
+- Enable GitHub vigilant mode.
+- Enable two-factor authentication on your GitHub account.
 
 ## References
 
 - [About commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification)
-- [Displaying verification statuses for all of your commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/displaying-verification-statuses-for-all-of-your-commits)
 - [Enable vigilant mode](https://docs.github.com/en/authentication/managing-commit-signature-verification/displaying-verification-statuses-for-all-of-your-commits#enabling-vigilant-mode)
-- [GPG setup walkthrough](https://docs.github.com/en/authentication/managing-commit-signature-verification/telling-git-about-your-signing-key)

@@ -221,8 +221,7 @@ Additional usage examples can be found in the test files.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow, local checks, and
-commit-signing expectations for contributions to `main`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 ## Credits
 
