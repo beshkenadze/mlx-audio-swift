@@ -748,8 +748,16 @@ public final class FireRedASR2Model: Module, STTGenerationModel {
     @ModuleInfo(key: "decoder") var decoder: FireRedASR2TransformerDecoder
 
     var tokenizer: FireRedASR2Tokenizer?
-    var cmvnMeans: MLXArray?
-    var cmvnIstd: MLXArray?
+    private var cmvnMeansValues: [Float]?
+    private var cmvnIstdValues: [Float]?
+
+    var cmvnMeans: MLXArray? {
+        cmvnMeansValues.map { MLXArray($0) }
+    }
+
+    var cmvnIstd: MLXArray? {
+        cmvnIstdValues.map { MLXArray($0) }
+    }
 
     public var vocabulary: [String] {
         tokenizer?.vocabulary ?? []
@@ -883,8 +891,8 @@ public final class FireRedASR2Model: Module, STTGenerationModel {
         if FileManager.default.fileExists(atPath: cmvnURL.path) {
             let data = try Data(contentsOf: cmvnURL)
             let cmvn = try JSONDecoder().decode(FireRedASR2CMVN.self, from: data)
-            cmvnMeans = MLXArray(cmvn.means)
-            cmvnIstd = MLXArray(cmvn.istd)
+            cmvnMeansValues = cmvn.means
+            cmvnIstdValues = cmvn.istd
         }
 
         let dictURL = modelDirectory.appendingPathComponent("dict.txt")
