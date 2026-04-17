@@ -563,7 +563,7 @@ public class StreamingInferenceSession: @unchecked Sendable {
         params: DecodePassParams,
         continuation: AsyncStream<TranscriptionEvent>.Continuation?,
         sharedState: OSAllocatedUnfairLock<SessionSharedState>,
-        tokenizer: any Tokenizer,
+        tokenizer: TextTokenizer,
         totalSamples: Int,
         decodeTime: Double,
         genTokenCount: Int,
