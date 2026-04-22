@@ -63,6 +63,16 @@ public final class ParakeetModel: Module, STTGenerationModel {
         )
     }
 
+    private var blankTokenId: Int {
+        vocabulary.count
+    }
+
+    private lazy var compiledTDTStep = makeCompiledTDTStep(
+        decoder: self.decoder,
+        joint: self.joint,
+        blankTokenId: self.blankTokenId
+    )
+
     private init(
         variant: Variant,
         preprocessConfig: ParakeetPreprocessConfig,
@@ -108,7 +118,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         let totalSamples = audio1D.shape[0]
         let audioDuration = Double(totalSamples) / Double(sampleRate)
         let chunkDuration = Double(generationParameters.chunkDuration)
-        let overlapDuration = 15.0
+        let overlapDuration = 2.0
 
         let result: ParakeetAlignedResult
         if chunkDuration <= 0 || audioDuration <= chunkDuration {
@@ -379,7 +389,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
         var results: [ParakeetAlignedResult] = []
         let batchSize = batchFeatures.shape[0]
-        let blankToken = vocabulary.count
+        let blankToken = blankTokenId
 
         for b in 0..<batchSize {
             let featureSeq = batchFeatures[b..<(b + 1)]
@@ -390,29 +400,29 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
             var t = 0
             var newSymbols = 0
-            var state: ParakeetLSTMState?
+            var state = makeInitialDecoderState(batchSize: 1, dtype: featureSeq.dtype)
 
             while t < maxLength {
                 let frame = featureSeq[0..., t..<(t + 1), 0...]
-                let currentToken: MLXArray? = lastToken == blankToken ? nil : MLXArray(lastToken).reshaped([1, 1]).asType(.int32)
+                let currentToken = MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
 
-                let decoderOut = decoder(currentToken, state: state)
-                let pred = decoderOut.0.asType(frame.dtype)
-                let proposedState: ParakeetLSTMState = (
-                    hidden: decoderOut.1.hidden?.asType(frame.dtype),
-                    cell: decoderOut.1.cell?.asType(frame.dtype)
-                )
-
-                let jointOut = joint(frame, pred)
-                eval(jointOut)
-                let tokenLogits = jointOut[0, 0, 0, ..<(blankToken + 1)]
-                let durationLogits = jointOut[0, 0, 0, (blankToken + 1)...]
-                let token = tokenLogits.argMax(axis: -1).item(Int.self)
-                let decision = durationLogits.argMax(axis: -1).item(Int.self)
+                let stepOutputs = compiledTDTStep([
+                    frame,
+                    currentToken,
+                    state.hidden!,
+                    state.cell!
+                ])
+                let predToken = stepOutputs[0]
+                let decision = stepOutputs[1]
+                let hidden = stepOutputs[2]
+                let cell = stepOutputs[3]
+                eval(predToken, decision, hidden, cell)
+                let token = Int(predToken.item(Int32.self))
+                let decisionIndex = Int(decision.item(Int32.self))
                 let step = ParakeetDecodingLogic.tdtStep(
                     predictedToken: token,
                     blankToken: blankToken,
-                    decisionIndex: decision,
+                    decisionIndex: decisionIndex,
                     durations: durations,
                     time: t,
                     newSymbols: newSymbols,
@@ -432,7 +442,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
                 if token != blankToken {
                     lastToken = token
-                    state = proposedState
+                    state = (hidden: hidden, cell: cell)
                     if !ParakeetTokenizer.isSpecialToken(token, vocabulary: vocabulary) {
                         let start = frameTimeSeconds(frameIndex: t)
                         let duration = frameTimeSeconds(frameIndex: step.jump)
@@ -832,6 +842,18 @@ public final class ParakeetModel: Module, STTGenerationModel {
         return MLX.concatenated([mel, padding], axis: 0)
     }
 
+    private func makeInitialDecoderState(batchSize: Int, dtype: DType) -> ParakeetLSTMState {
+        guard let decoder else {
+            return (hidden: nil, cell: nil)
+        }
+
+        let decRnn = decoder.prediction.decRnn
+        let hiddenSize = decRnn.layers.first?.hiddenSize ?? decoder.predHidden
+        let shape = [decRnn.numLayers, batchSize, hiddenSize]
+        let zeros = MLXArray.zeros(shape, type: Float.self).asType(dtype)
+        return (hidden: zeros, cell: zeros)
+    }
+
     private func decodeChunk(_ chunkAudio: MLXArray) -> ParakeetAlignedResult {
         let mel = ParakeetAudio.logMelSpectrogram(chunkAudio, config: preprocessConfig)
         return decode(mel: mel)[0]
@@ -854,6 +876,44 @@ public final class ParakeetModel: Module, STTGenerationModel {
         } catch {
             return ParakeetAlignment.mergeLongestCommonSubsequence(existing, incoming, overlapDuration: overlapDuration)
         }
+    }
+}
+
+private func makeCompiledTDTStep(
+    decoder: ParakeetPredictNetwork?,
+    joint: ParakeetJointNetwork?,
+    blankTokenId: Int
+) -> @Sendable ([MLXArray]) -> [MLXArray] {
+    guard let decoder, let joint else {
+        return { arrays in
+            [MLXArray(Int32(0)), MLXArray(Int32(0)), arrays[2], arrays[3]]
+        }
+    }
+
+    let blankTokenArray = MLXArray(Int32(blankTokenId)).reshaped([1, 1])
+
+    return compile { arrays in
+        let feature = arrays[0]
+        let currentToken = arrays[1]
+        let hidden = arrays[2]
+        let cell = arrays[3]
+
+        let embedded = decoder.prediction.embed(currentToken)
+        let blankMask = (currentToken .== blankTokenArray).expandedDimensions(axis: 2)
+        let zeroEmbedded = MLXArray.zeros(embedded.shape, type: Float.self).asType(embedded.dtype)
+        let maskedEmbedded = MLX.where(blankMask, zeroEmbedded, embedded)
+
+        let decoderOut = decoder.prediction.decRnn(maskedEmbedded, state: (hidden: hidden, cell: cell))
+        let pred = decoderOut.0.asType(feature.dtype)
+        let hiddenOut = decoderOut.1.hidden!.asType(feature.dtype)
+        let cellOut = decoderOut.1.cell!.asType(feature.dtype)
+
+        let jointOut = joint(feature, pred)
+        let tokenLogits = jointOut[0, 0, 0, ..<(blankTokenId + 1)]
+        let durationLogits = jointOut[0, 0, 0, (blankTokenId + 1)...]
+        let predToken = tokenLogits.argMax(axis: -1).asType(.int32)
+        let decision = durationLogits.argMax(axis: -1).asType(.int32)
+        return [predToken, decision, hiddenOut, cellOut]
     }
 }
 
