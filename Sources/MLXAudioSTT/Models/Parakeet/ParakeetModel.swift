@@ -79,7 +79,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         audio: MLXArray,
         generationParameters: STTGenerateParameters
     ) -> STTOutput {
-        let audio1D = audio.ndim > 1 ? audio.mean(axis: -1) : audio
+        let audio1D = normalizeAudioToMono(audio)
         let sampleRate = preprocessConfig.sampleRate
         let totalSamples = audio1D.shape[0]
         let audioDuration = Double(totalSamples) / Double(sampleRate)
@@ -126,12 +126,31 @@ public final class ParakeetModel: Module, STTGenerationModel {
         )
     }
 
+    public func generateBatch(
+        audios: [MLXArray],
+        generationParameters: STTGenerateParameters = STTGenerateParameters()
+    ) throws -> [STTOutput] {
+        guard !audios.isEmpty else {
+            throw STTError.invalidInput("Parakeet generateBatch requires at least one chunk-sized audio input.")
+        }
+
+        let batchFeatures = makeBatchFeatures(audios)
+        let results = decode(mel: batchFeatures.features, lengths: batchFeatures.lengths)
+        return results.map {
+            STTOutput(
+                text: $0.text,
+                segments: $0.segments,
+                language: generationParameters.language
+            )
+        }
+    }
+
     public func generateStream(
         audio: MLXArray,
         generationParameters: STTGenerateParameters
     ) -> AsyncThrowingStream<STTGeneration, Error> {
         AsyncThrowingStream { continuation in
-            let audio1D = audio.ndim > 1 ? audio.mean(axis: -1) : audio
+            let audio1D = self.normalizeAudioToMono(audio)
             let sampleRate = self.preprocessConfig.sampleRate
             let totalSamples = audio1D.shape[0]
             let audioDuration = Double(totalSamples) / Double(sampleRate)
@@ -208,18 +227,18 @@ public final class ParakeetModel: Module, STTGenerationModel {
         }
     }
 
-    func decode(mel: MLXArray) -> [ParakeetAlignedResult] {
+    func decode(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
         switch variant {
         case .tdt, .tdtCtc:
-            return decodeTDT(mel: mel)
+            return decodeTDT(mel: mel, lengths: lengths)
         case .rnnt:
-            return decodeRNNT(mel: mel)
+            return decodeRNNT(mel: mel, lengths: lengths)
         case .ctc:
-            return decodeCTC(mel: mel)
+            return decodeCTC(mel: mel, lengths: lengths)
         }
     }
 
-    private func decodeTDT(mel: MLXArray) -> [ParakeetAlignedResult] {
+    private func decodeTDT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
         guard let decoder, let joint else { return [] }
 
         var features = mel
@@ -227,7 +246,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
             features = features.expandedDimensions(axis: 0)
         }
 
-        let encoded = encoder(features)
+        let encoded = encoder(features, lengths: lengths)
         let batchFeatures = encoded.0
         let lengths = encoded.1
         eval(batchFeatures, lengths)
@@ -305,7 +324,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         return results
     }
 
-    private func decodeRNNT(mel: MLXArray) -> [ParakeetAlignedResult] {
+    private func decodeRNNT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
         guard let decoder, let joint else { return [] }
 
         var features = mel
@@ -313,7 +332,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
             features = features.expandedDimensions(axis: 0)
         }
 
-        let encoded = encoder(features)
+        let encoded = encoder(features, lengths: lengths)
         let batchFeatures = encoded.0
         let lengths = encoded.1
         eval(batchFeatures, lengths)
@@ -386,7 +405,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         return results
     }
 
-    private func decodeCTC(mel: MLXArray) -> [ParakeetAlignedResult] {
+    private func decodeCTC(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
         guard let ctcDecoder else { return [] }
 
         var features = mel
@@ -394,7 +413,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
             features = features.expandedDimensions(axis: 0)
         }
 
-        let encoded = encoder(features)
+        let encoded = encoder(features, lengths: lengths)
         let batchFeatures = encoded.0
         let lengths = encoded.1
         let logits = ctcDecoder(batchFeatures)
@@ -434,6 +453,38 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
     private func frameTimeSeconds(frameIndex: Int) -> Double {
         Double(frameIndex * encoderConfig.subsamplingFactor * preprocessConfig.hopLength) / Double(preprocessConfig.sampleRate)
+    }
+
+    private func normalizeAudioToMono(_ audio: MLXArray) -> MLXArray {
+        audio.ndim > 1 ? audio.mean(axis: -1) : audio
+    }
+
+    private func makeBatchFeatures(_ audios: [MLXArray]) -> (features: MLXArray, lengths: MLXArray) {
+        let melFeatures = audios.map { makeMelFeatures(from: normalizeAudioToMono($0)) }
+        let frameLengths = melFeatures.map { Int32($0.shape[0]) }
+        let maxFrameLength = melFeatures.map { $0.shape[0] }.max() ?? 0
+        let padded = melFeatures.map { padMelFeatures($0, targetFrameLength: maxFrameLength) }
+
+        return (
+            features: MLX.stacked(padded, axis: 0),
+            lengths: MLXArray(frameLengths).asType(.int32)
+        )
+    }
+
+    private func makeMelFeatures(from audio: MLXArray) -> MLXArray {
+        ParakeetAudio.logMelSpectrogram(audio, config: preprocessConfig).squeezed(axis: 0)
+    }
+
+    private func padMelFeatures(_ mel: MLXArray, targetFrameLength: Int) -> MLXArray {
+        let currentFrameLength = mel.shape[0]
+        guard currentFrameLength < targetFrameLength else {
+            return mel
+        }
+
+        let featureCount = mel.shape[1]
+        let padding = MLXArray.zeros([targetFrameLength - currentFrameLength, featureCount], type: Float.self)
+            .asType(mel.dtype)
+        return MLX.concatenated([mel, padding], axis: 0)
     }
 
     private func decodeChunk(_ chunkAudio: MLXArray) -> ParakeetAlignedResult {
