@@ -13,6 +13,11 @@ struct ParakeetBatchParityTests {
         return try ParakeetModel.fromDirectory(fixtureDir)
     }
 
+    private func makeTDTFixtureModel(blankAsPad: Bool = true) throws -> ParakeetModel {
+        let fixtureDir = try makeTDTFixtureDirectory(blankAsPad: blankAsPad)
+        return try ParakeetModel.fromDirectory(fixtureDir)
+    }
+
     @Test("generateBatch preserves order and text parity for chunk-sized audio")
     func generateBatchPreservesOrderAndTextParity() throws {
         let model = try makeFixtureModel()
@@ -51,6 +56,110 @@ struct ParakeetBatchParityTests {
 
         #expect(batch.count == 1)
         #expect(outputSignature(batch[0]) == outputSignature(single))
+    }
+
+    @Test("TDT fixture can decode batched inputs")
+    func tdtFixtureCanDecodeBatchedInputs() throws {
+        let model = try makeTDTFixtureModel()
+        let audios = [
+            makeChunkAudio(sampleCount: 3_200, frequency: 180),
+            makeChunkAudio(sampleCount: 9_600, frequency: 260),
+            makeChunkAudio(sampleCount: 16_000, frequency: 340),
+        ]
+        let traceOracle = makeTDTTraceOracleScaffold(batchSize: audios.count, durations: model.durations)
+        model.tdtDecoderImplementation = .serial
+        model.tdtTraceEmitter = traceOracle.serialEmitter
+
+        #expect(model.variant == .tdt)
+        #expect(model.durations == [0, 1, 2])
+        #expect(traceOracle.expectedBatchSize == audios.count)
+        #expect(traceOracle.fixtureDurations == model.durations)
+
+        let singleOutputs = audios.map { model.generate(audio: $0) }
+        let batchOutputs = try model.generateBatch(audios: audios)
+
+        #expect(batchOutputs.count == audios.count)
+        #expect(batchOutputs.map(outputSignature) == singleOutputs.map(outputSignature))
+        #expect(batchOutputs.allSatisfy { !$0.text.isEmpty })
+
+        #expect(
+            traceOracle.isReadyForComparison,
+            "Trace hooks for old/new decodeTDT paths are not implemented yet"
+        )
+        #expect(!traceOracle.serialTrace.isEmpty)
+    }
+
+    @Test("old and new decodeTDT traces match on TDT fixture")
+    func oldAndNewDecodeTDTTracesMatch() throws {
+        let audios = [
+            makeChunkAudio(sampleCount: 4_800, frequency: 180),
+            makeChunkAudio(sampleCount: 8_000, frequency: 260),
+            makeChunkAudio(sampleCount: 12_800, frequency: 340),
+        ]
+
+        let serialModel = try makeTDTFixtureModel()
+        let traceOracle = makeTDTTraceOracleScaffold(batchSize: audios.count, durations: serialModel.durations)
+        serialModel.tdtDecoderImplementation = .serial
+        serialModel.tdtTraceEmitter = traceOracle.serialEmitter
+        let serialOutputs = try serialModel.generateBatch(audios: audios)
+
+        let hybridModel = try makeTDTFixtureModel()
+        hybridModel.tdtDecoderImplementation = .hybrid
+        hybridModel.tdtTraceEmitter = traceOracle.hybridEmitter
+        let hybridOutputs = try hybridModel.generateBatch(audios: audios)
+
+        #expect(serialOutputs.map(outputSignature) == hybridOutputs.map(outputSignature))
+        #expect(groupTraceStepsByRow(traceOracle.serialTrace) == groupTraceStepsByRow(traceOracle.hybridTrace))
+        #expect(!traceOracle.serialTrace.isEmpty)
+    }
+
+    @Test("Parakeet predictor accepts batched blank-masked token input")
+    func predictorAcceptsBatchedTokenInput() throws {
+        let model = try makeTDTFixtureModel()
+        let blankToken = Int32(model.vocabulary.count)
+        let state: ParakeetLSTMState = (
+            hidden: MLXArray.zeros([1, 3, 8], type: Float.self),
+            cell: MLXArray.zeros([1, 3, 8], type: Float.self)
+        )
+        let tokenIds = MLXArray([blankToken, Int32(1), blankToken]).reshaped([3, 1]).asType(.int32)
+
+        let blankReference = try #require(model.predictTDTToken(nil, state: nil)).0.reshaped([8]).asArray(Float.self)
+        let batched = try #require(model.predictTDTBatch(tokenIds, state: state, blankToken: blankToken))
+
+        guard batched.0.shape == [3, 1, 8] else {
+            Issue.record("unexpected batched predictor shape: \(batched.0.shape)")
+            return
+        }
+        #expect(batched.1.hidden?.shape == [1, 3, 8])
+        #expect(batched.1.cell?.shape == [1, 3, 8])
+
+        let batchedPred = batched.0.reshaped([3, 8]).asArray(Float.self)
+
+        let blankRow0 = Array(batchedPred[0..<8])
+        let nonBlankRow = Array(batchedPred[8..<16])
+        let blankRow2 = Array(batchedPred[16..<24])
+
+        #expect(blankRow0 == blankReference)
+        #expect(blankRow2 == blankReference)
+        #expect(nonBlankRow != blankReference)
+        #expect(blankRow0 == blankRow2)
+    }
+
+    @Test("Parakeet predictor batches blanks when blank_as_pad is false")
+    func predictorBatchesBlanksWithoutBlankAsPad() throws {
+        let model = try makeTDTFixtureModel(blankAsPad: false)
+        let blankToken = Int32(model.vocabulary.count)
+        let state: ParakeetLSTMState = (
+            hidden: MLXArray.ones([1, 2, 8], type: Float.self),
+            cell: MLXArray.ones([1, 2, 8], type: Float.self)
+        )
+        let tokenIds = MLXArray([blankToken, Int32(1)]).reshaped([2, 1]).asType(.int32)
+
+        let batched = try #require(model.predictTDTBatch(tokenIds, state: state, blankToken: blankToken))
+
+        #expect(batched.0.shape == [2, 1, 8])
+        #expect(batched.1.hidden?.shape == [1, 2, 8])
+        #expect(batched.1.cell?.shape == [1, 2, 8])
     }
 
     @Test("generateBatch normalizes multichannel audio to mono before mel extraction")
@@ -280,6 +389,42 @@ private struct BatchBenchmarkResult {
     }
 }
 
+private typealias TDTTraceStep = ParakeetModel.TDTTraceStep
+private typealias TDTTraceEmitter = @Sendable (TDTTraceStep) -> Void
+
+private struct TDTTraceOracleScaffold {
+    let expectedBatchSize: Int
+    let fixtureDurations: [Int]
+    private let serialTraceStorage: TraceStorage
+    private let hybridTraceStorage: TraceStorage
+
+    init(expectedBatchSize: Int, fixtureDurations: [Int], serialTraceStorage: TraceStorage, hybridTraceStorage: TraceStorage) {
+        self.expectedBatchSize = expectedBatchSize
+        self.fixtureDurations = fixtureDurations
+        self.serialTraceStorage = serialTraceStorage
+        self.hybridTraceStorage = hybridTraceStorage
+    }
+
+    var serialTrace: [TDTTraceStep] { serialTraceStorage.steps }
+    var hybridTrace: [TDTTraceStep] { hybridTraceStorage.steps }
+    var serialEmitter: TDTTraceEmitter { serialTraceStorage.makeEmitter() }
+    var hybridEmitter: TDTTraceEmitter { hybridTraceStorage.makeEmitter() }
+
+    var isReadyForComparison: Bool {
+        true
+    }
+}
+
+private final class TraceStorage: @unchecked Sendable {
+    private(set) var steps: [TDTTraceStep] = []
+
+    func makeEmitter() -> TDTTraceEmitter {
+        { [weak self] step in
+            self?.steps.append(step)
+        }
+    }
+}
+
 private func makeFixtureDirectory() throws -> URL {
     let fixtureDir = FileManager.default.temporaryDirectory
         .appendingPathComponent("parakeet-batch-fixture-\(UUID().uuidString)")
@@ -332,6 +477,111 @@ private func makeFixtureDirectory() throws -> URL {
         "encoder.pre_encode.out.bias": MLXArray.zeros([16], type: Float.self),
         "decoder.decoder_layers.0.weight": MLXArray.zeros([5, 1, 16], type: Float.self),
         "decoder.decoder_layers.0.bias": MLXArray([Float(0.3), 0.2, 0.1, -0.1, -0.5]),
+    ]
+    try MLX.save(arrays: weights, url: fixtureDir.appendingPathComponent("model.safetensors"))
+
+    return fixtureDir
+}
+
+private func makeTDTTraceOracleScaffold(batchSize: Int, durations: [Int]) -> TDTTraceOracleScaffold {
+    TDTTraceOracleScaffold(
+        expectedBatchSize: batchSize,
+        fixtureDurations: durations,
+        serialTraceStorage: TraceStorage(),
+        hybridTraceStorage: TraceStorage()
+    )
+}
+
+private func groupTraceStepsByRow(_ steps: [TDTTraceStep]) -> [Int: [TDTTraceStep]] {
+    Dictionary(grouping: steps, by: \ .row)
+}
+
+private func makeTDTFixtureDirectory(blankAsPad: Bool = true) throws -> URL {
+    let fixtureDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("parakeet-tdt-fixture-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+
+    let configJSON = """
+    {
+      "target": "nemo.collections.asr.models.rnnt_bpe_models.EncDecRNNTBPEModel",
+      "model_defaults": {"tdt_durations": [0, 1, 2]},
+      "preprocessor": {
+        "sample_rate": 16000,
+        "normalize": "per_feature",
+        "window_size": 0.02,
+        "window_stride": 0.01,
+        "window": "hann",
+        "features": 80,
+        "n_fft": 512,
+        "dither": 0.0
+      },
+      "encoder": {
+        "feat_in": 80,
+        "n_layers": 0,
+        "d_model": 16,
+        "n_heads": 4,
+        "ff_expansion_factor": 2,
+        "subsampling_factor": 2,
+        "self_attention_model": "abs_pos",
+        "subsampling": "dw_striding",
+        "conv_kernel_size": 15,
+        "subsampling_conv_channels": 16,
+        "pos_emb_max_len": 128
+      },
+      "decoder": {
+        "blank_as_pad": \(blankAsPad ? "true" : "false"),
+        "vocab_size": 4,
+        "prednet": {
+          "pred_hidden": 8,
+          "pred_rnn_layers": 1,
+          "rnn_hidden_size": 8
+        }
+      },
+      "joint": {
+        "num_classes": 4,
+        "num_extra_outputs": 3,
+        "vocabulary": ["▁", "a", "b", "."],
+        "jointnet": {
+          "joint_hidden": 8,
+          "activation": "relu",
+          "encoder_hidden": 16,
+          "pred_hidden": 8
+        }
+      },
+      "decoding": {
+        "model_type": "tdt",
+        "durations": [0, 1, 2],
+        "greedy": {"max_symbols": 4}
+      }
+    }
+    """
+    try configJSON.write(
+        to: fixtureDir.appendingPathComponent("config.json"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let weights: [String: MLXArray] = [
+        "encoder.pre_encode.conv0.weight": MLXArray.zeros([16, 3, 3, 1], type: Float.self),
+        "encoder.pre_encode.conv0.bias": MLXArray.zeros([16], type: Float.self),
+        "encoder.pre_encode.out.weight": MLXArray.zeros([16, 640], type: Float.self),
+        "encoder.pre_encode.out.bias": MLXArray.zeros([16], type: Float.self),
+        "decoder.prediction.embed.weight": MLXArray(Array([
+            Float(0.1), Float(0.0), Float(0.0), Float(0.0), Float(0.0), Float(0.0), Float(0.0), Float(0.0),
+            Float(0.2), Float(0.1), Float(0.0), Float(0.0), Float(0.0), Float(0.0), Float(0.0), Float(0.0),
+            Float(0.3), Float(0.1), Float(0.1), Float(0.0), Float(0.0), Float(0.0), Float(0.0), Float(0.0),
+            Float(0.4), Float(0.2), Float(0.1), Float(0.1), Float(0.0), Float(0.0), Float(0.0), Float(0.0),
+            Float(0.9), Float(0.9), Float(0.9), Float(0.9), Float(0.9), Float(0.9), Float(0.9), Float(0.9),
+        ].prefix(blankAsPad ? 40 : 32))).reshaped([blankAsPad ? 5 : 4, 8]),
+        "decoder.prediction.dec_rnn.lstm.0.Wx": MLXArray.ones([32, 8], type: Float.self),
+        "decoder.prediction.dec_rnn.lstm.0.Wh": MLXArray.zeros([32, 8], type: Float.self),
+        "decoder.prediction.dec_rnn.lstm.0.bias": MLXArray.zeros([32], type: Float.self),
+        "joint.pred.weight": MLXArray.zeros([8, 8], type: Float.self),
+        "joint.pred.bias": MLXArray.zeros([8], type: Float.self),
+        "joint.enc.weight": MLXArray.zeros([8, 16], type: Float.self),
+        "joint.enc.bias": MLXArray.zeros([8], type: Float.self),
+        "joint.joint_net.weight": MLXArray.zeros([8, 8], type: Float.self),
+        "joint.joint_net.bias": MLXArray([Float(0.0), 4.0, 1.0, -1.0, -3.0, 0.0, 5.0, 1.0]),
     ]
     try MLX.save(arrays: weights, url: fixtureDir.appendingPathComponent("model.safetensors"))
 
