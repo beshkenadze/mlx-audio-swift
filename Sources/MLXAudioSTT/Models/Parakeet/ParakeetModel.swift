@@ -246,9 +246,18 @@ public final class ParakeetModel: Module, STTGenerationModel {
             features = features.expandedDimensions(axis: 0)
         }
 
+        assert(
+            features.ndim == 3 && features.shape[2] == preprocessConfig.features,
+            "Parakeet TDT input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
+        )
+
         let encoded = encoder(features, lengths: lengths)
         let batchFeatures = encoded.0
         let lengths = encoded.1
+        assert(
+            batchFeatures.ndim == 3 && batchFeatures.shape[2] == encoderConfig.dModel,
+            "Parakeet TDT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
+        )
         eval(batchFeatures, lengths)
 
         var results: [ParakeetAlignedResult] = []
@@ -332,9 +341,18 @@ public final class ParakeetModel: Module, STTGenerationModel {
             features = features.expandedDimensions(axis: 0)
         }
 
+        assert(
+            features.ndim == 3 && features.shape[2] == preprocessConfig.features,
+            "Parakeet RNNT input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
+        )
+
         let encoded = encoder(features, lengths: lengths)
         let batchFeatures = encoded.0
         let lengths = encoded.1
+        assert(
+            batchFeatures.ndim == 3 && batchFeatures.shape[2] == encoderConfig.dModel,
+            "Parakeet RNNT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
+        )
         eval(batchFeatures, lengths)
 
         var results: [ParakeetAlignedResult] = []
@@ -413,9 +431,18 @@ public final class ParakeetModel: Module, STTGenerationModel {
             features = features.expandedDimensions(axis: 0)
         }
 
+        assert(
+            features.ndim == 3 && features.shape[2] == preprocessConfig.features,
+            "Parakeet CTC input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
+        )
+
         let encoded = encoder(features, lengths: lengths)
         let batchFeatures = encoded.0
         let lengths = encoded.1
+        assert(
+            batchFeatures.ndim == 3 && batchFeatures.shape[2] == encoderConfig.dModel,
+            "Parakeet CTC encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
+        )
         let logits = ctcDecoder(batchFeatures)
         eval(logits, lengths)
 
@@ -461,12 +488,22 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
     private func makeBatchFeatures(_ audios: [MLXArray]) -> (features: MLXArray, lengths: MLXArray) {
         let melFeatures = audios.map { makeMelFeatures(from: normalizeAudioToMono($0)) }
+        assert(
+            melFeatures.allSatisfy { $0.ndim == 2 && $0.shape[1] == preprocessConfig.features },
+            "Parakeet batch mel feature shape mismatch before stacking; expected trailing dim \(preprocessConfig.features)"
+        )
         let frameLengths = melFeatures.map { Int32($0.shape[0]) }
         let maxFrameLength = melFeatures.map { $0.shape[0] }.max() ?? 0
         let padded = melFeatures.map { padMelFeatures($0, targetFrameLength: maxFrameLength) }
 
+        let stacked = MLX.stacked(padded, axis: 0)
+        assert(
+            stacked.ndim == 3 && stacked.shape[2] == preprocessConfig.features,
+            "Parakeet batch feature stack mismatch: expected [B, T, \(preprocessConfig.features)], got \(stacked.shape)"
+        )
+
         return (
-            features: MLX.stacked(padded, axis: 0),
+            features: stacked,
             lengths: MLXArray(frameLengths).asType(.int32)
         )
     }
