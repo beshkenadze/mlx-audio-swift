@@ -40,7 +40,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
     @ModuleInfo(key: "joint") var joint: ParakeetJointNetwork?
     @ModuleInfo(key: "ctc_decoder") var ctcDecoder: ParakeetConvASRDecoder?
 
-    var tdtDecoderImplementation: TDTDecoderImplementation = .serial
+    var tdtDecoderImplementation: TDTDecoderImplementation?
     var tdtTraceEmitter: (@Sendable (TDTTraceStep) -> Void)?
 
     public var defaultGenerationParameters: STTGenerateParameters {
@@ -149,6 +149,14 @@ public final class ParakeetModel: Module, STTGenerationModel {
     ) throws -> [STTOutput] {
         guard !audios.isEmpty else {
             throw STTError.invalidInput("Parakeet generateBatch requires at least one chunk-sized audio input.")
+        }
+
+        let previousTDTDecoderImplementation = tdtDecoderImplementation
+        if previousTDTDecoderImplementation == nil {
+            tdtDecoderImplementation = audios.count > 1 ? .hybrid : .serial
+        }
+        defer {
+            tdtDecoderImplementation = previousTDTDecoderImplementation
         }
 
         let batchFeatures = makeBatchFeatures(audios)
@@ -291,7 +299,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         )
         eval(batchFeatures, lengths)
 
-        switch tdtDecoderImplementation {
+        switch tdtDecoderImplementation ?? .serial {
         case .serial:
             return decodeTDTSerial(batchFeatures: batchFeatures, lengths: lengths, decoder: decoder, joint: joint)
         case .hybrid:

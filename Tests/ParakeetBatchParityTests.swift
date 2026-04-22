@@ -113,6 +113,50 @@ struct ParakeetBatchParityTests {
         #expect(!traceOracle.serialTrace.isEmpty)
     }
 
+    @Test("TDT generateBatch defaults to hybrid for multi-item batches")
+    func tdtGenerateBatchDefaultsToHybridForMultiItemBatches() throws {
+        let audios = [
+            makeChunkAudio(sampleCount: 4_800, frequency: 180),
+            makeChunkAudio(sampleCount: 8_000, frequency: 260),
+            makeChunkAudio(sampleCount: 12_800, frequency: 340),
+        ]
+
+        let defaultModel = try makeTDTFixtureModel()
+        let defaultTrace = makeTDTTraceOracleScaffold(batchSize: audios.count, durations: defaultModel.durations)
+        defaultModel.tdtTraceEmitter = defaultTrace.hybridEmitter
+        let defaultOutputs = try defaultModel.generateBatch(audios: audios)
+
+        let explicitHybridModel = try makeTDTFixtureModel()
+        let hybridTrace = makeTDTTraceOracleScaffold(batchSize: audios.count, durations: explicitHybridModel.durations)
+        explicitHybridModel.tdtDecoderImplementation = .hybrid
+        explicitHybridModel.tdtTraceEmitter = hybridTrace.hybridEmitter
+        let explicitHybridOutputs = try explicitHybridModel.generateBatch(audios: audios)
+
+        #expect(defaultOutputs.map(outputSignature) == explicitHybridOutputs.map(outputSignature))
+        #expect(groupTraceStepsByRow(defaultTrace.hybridTrace) == groupTraceStepsByRow(hybridTrace.hybridTrace))
+        #expect(!defaultTrace.hybridTrace.isEmpty)
+    }
+
+    @Test("TDT generateBatch defaults to serial for singleton batches")
+    func tdtGenerateBatchDefaultsToSerialForSingletonBatches() throws {
+        let audio = makeChunkAudio(sampleCount: 8_000, frequency: 220)
+
+        let defaultModel = try makeTDTFixtureModel()
+        let defaultTrace = makeTDTTraceOracleScaffold(batchSize: 1, durations: defaultModel.durations)
+        defaultModel.tdtTraceEmitter = defaultTrace.serialEmitter
+        let defaultOutputs = try defaultModel.generateBatch(audios: [audio])
+
+        let explicitSerialModel = try makeTDTFixtureModel()
+        let serialTrace = makeTDTTraceOracleScaffold(batchSize: 1, durations: explicitSerialModel.durations)
+        explicitSerialModel.tdtDecoderImplementation = .serial
+        explicitSerialModel.tdtTraceEmitter = serialTrace.serialEmitter
+        let explicitSerialOutputs = try explicitSerialModel.generateBatch(audios: [audio])
+
+        #expect(defaultOutputs.map(outputSignature) == explicitSerialOutputs.map(outputSignature))
+        #expect(defaultTrace.serialTrace == serialTrace.serialTrace)
+        #expect(!defaultTrace.serialTrace.isEmpty)
+    }
+
     @Test("Parakeet predictor accepts batched blank-masked token input")
     func predictorAcceptsBatchedTokenInput() throws {
         let model = try makeTDTFixtureModel()
