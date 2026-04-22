@@ -435,7 +435,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
                         time: t,
                         newSymbols: newSymbols,
                         token: token,
-                        decisionIndex: decision,
+                        decisionIndex: decisionIndex,
                         committedState: token != blankToken
                     )
                 )
