@@ -98,12 +98,16 @@ final class ParakeetRelPositionMultiHeadAttention: ParakeetMultiHeadAttention {
         let qProj = linearQ(q)
         let kProj = linearK(k)
         let vProj = linearV(v)
-        let pProj = linearPos(posEmb)
+        var pProj = linearPos(posEmb)
 
         let batch = qProj.shape[0]
         let qSeq = qProj.shape[1]
         let kSeq = kProj.shape[1]
         let posLen = pProj.shape[1]
+
+        if pProj.shape[0] == 1 && batch > 1 {
+            pProj = MLX.broadcast(pProj, to: [batch, posLen, nFeat])
+        }
 
         let qHeads = qProj.reshaped(batch, qSeq, nHead, headDim)
         let qU = (qHeads + posBiasU).transposed(0, 2, 1, 3)
