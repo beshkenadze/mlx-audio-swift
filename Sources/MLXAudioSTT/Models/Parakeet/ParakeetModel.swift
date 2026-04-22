@@ -21,10 +21,27 @@ public final class ParakeetModel: Module, STTGenerationModel {
     public let durations: [Int]
     public let maxSymbols: Int?
 
+    enum TDTDecoderImplementation: Sendable {
+        case serial
+        case hybrid
+    }
+
+    struct TDTTraceStep: Sendable, Equatable {
+        let row: Int
+        let time: Int
+        let newSymbols: Int
+        let token: Int
+        let decisionIndex: Int
+        let committedState: Bool
+    }
+
     @ModuleInfo(key: "encoder") var encoder: ParakeetConformer
     @ModuleInfo(key: "decoder") var decoder: ParakeetPredictNetwork?
     @ModuleInfo(key: "joint") var joint: ParakeetJointNetwork?
     @ModuleInfo(key: "ctc_decoder") var ctcDecoder: ParakeetConvASRDecoder?
+
+    var tdtDecoderImplementation: TDTDecoderImplementation = .serial
+    var tdtTraceEmitter: (@Sendable (TDTTraceStep) -> Void)?
 
     public var defaultGenerationParameters: STTGenerateParameters {
         STTGenerateParameters(
@@ -238,6 +255,20 @@ public final class ParakeetModel: Module, STTGenerationModel {
         }
     }
 
+    func predictTDTToken(_ token: MLXArray?, state: ParakeetLSTMState? = nil) -> (MLXArray, ParakeetLSTMState)? {
+        guard let decoder else { return nil }
+        return decoder(token, state: state)
+    }
+
+    func predictTDTBatch(
+        _ tokenIds: MLXArray,
+        state: ParakeetLSTMState? = nil,
+        blankToken: Int32
+    ) -> (MLXArray, ParakeetLSTMState)? {
+        guard let decoder else { return nil }
+        return decoder.predictBatched(tokenIds, state: state, blankToken: blankToken)
+    }
+
     private func decodeTDT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
         guard let decoder, let joint else { return [] }
 
@@ -259,6 +290,21 @@ public final class ParakeetModel: Module, STTGenerationModel {
             "Parakeet TDT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
         )
         eval(batchFeatures, lengths)
+
+        switch tdtDecoderImplementation {
+        case .serial:
+            return decodeTDTSerial(batchFeatures: batchFeatures, lengths: lengths, decoder: decoder, joint: joint)
+        case .hybrid:
+            return decodeTDTHybrid(batchFeatures: batchFeatures, lengths: lengths, decoder: decoder, joint: joint)
+        }
+    }
+
+    private func decodeTDTSerial(
+        batchFeatures: MLXArray,
+        lengths: MLXArray,
+        decoder: ParakeetPredictNetwork,
+        joint: ParakeetJointNetwork
+    ) -> [ParakeetAlignedResult] {
 
         var results: [ParakeetAlignedResult] = []
         let batchSize = batchFeatures.shape[0]
@@ -302,6 +348,17 @@ public final class ParakeetModel: Module, STTGenerationModel {
                     maxSymbols: maxSymbols
                 )
 
+                tdtTraceEmitter?(
+                    TDTTraceStep(
+                        row: b,
+                        time: t,
+                        newSymbols: newSymbols,
+                        token: token,
+                        decisionIndex: decision,
+                        committedState: token != blankToken
+                    )
+                )
+
                 if token != blankToken {
                     lastToken = token
                     state = proposedState
@@ -331,6 +388,182 @@ public final class ParakeetModel: Module, STTGenerationModel {
         }
 
         return results
+    }
+
+    private func decodeTDTHybrid(
+        batchFeatures: MLXArray,
+        lengths: MLXArray,
+        decoder: ParakeetPredictNetwork,
+        joint: ParakeetJointNetwork
+    ) -> [ParakeetAlignedResult] {
+        let batchSize = batchFeatures.shape[0]
+        let blankToken = vocabulary.count
+        let maxLengthByRow = lengths.asArray(Int32.self).map(Int.init)
+        let hiddenSize = decoder.prediction.decRnn.layers.first?.hiddenSize ?? decoder.predHidden
+        let numLayers = decoder.prediction.decRnn.numLayers
+        let stateShape = [numLayers, batchSize, hiddenSize]
+
+        var fullState: ParakeetLSTMState = (
+            hidden: MLXArray.zeros(stateShape, type: Float.self).asType(batchFeatures.dtype),
+            cell: MLXArray.zeros(stateShape, type: Float.self).asType(batchFeatures.dtype)
+        )
+
+        var timeByRow = Array(repeating: 0, count: batchSize)
+        var newSymbolsByRow = Array(repeating: 0, count: batchSize)
+        var lastTokenByRow = Array(repeating: blankToken, count: batchSize)
+        var doneByRow = Array(repeating: false, count: batchSize)
+        var hypothesisByRow = Array(repeating: [ParakeetAlignedToken](), count: batchSize)
+
+        while true {
+            let activeRows = (0..<batchSize).filter { row in
+                let isActive = timeByRow[row] < maxLengthByRow[row]
+                doneByRow[row] = !isActive
+                return isActive
+            }
+
+            if activeRows.isEmpty {
+                break
+            }
+
+            let activeFrames = gatherActiveFrames(batchFeatures: batchFeatures, activeRows: activeRows, timeByRow: timeByRow)
+            let activeState = gatherActiveState(fullState, activeRows: activeRows)
+            let tokenIds = MLXArray(activeRows.map { Int32(lastTokenByRow[$0]) }).reshaped([activeRows.count, 1]).asType(.int32)
+
+            let decoderOut = decoder.predictBatched(tokenIds, state: activeState, blankToken: Int32(blankToken))
+            let pred = decoderOut.0.asType(activeFrames.dtype)
+            let proposedState: ParakeetLSTMState = (
+                hidden: decoderOut.1.hidden?.asType(activeFrames.dtype),
+                cell: decoderOut.1.cell?.asType(activeFrames.dtype)
+            )
+
+            let jointOut = joint(activeFrames, pred)
+            eval(jointOut)
+
+            let tokenLogits = jointOut[0..., 0, 0, ..<(blankToken + 1)]
+            let durationLogits = jointOut[0..., 0, 0, (blankToken + 1)...]
+            let predictedTokens = tokenLogits.argMax(axis: -1).asArray(Int32.self).map(Int.init)
+            let decisionIndices = durationLogits.argMax(axis: -1).asArray(Int32.self).map(Int.init)
+
+            var committedRows = Array(repeating: false, count: activeRows.count)
+
+            for (activeIndex, row) in activeRows.enumerated() {
+                let token = predictedTokens[activeIndex]
+                let decisionIndex = decisionIndices[activeIndex]
+                let currentTime = timeByRow[row]
+                let currentNewSymbols = newSymbolsByRow[row]
+                let step = ParakeetDecodingLogic.tdtStep(
+                    predictedToken: token,
+                    blankToken: blankToken,
+                    decisionIndex: decisionIndex,
+                    durations: durations,
+                    time: currentTime,
+                    newSymbols: currentNewSymbols,
+                    maxSymbols: maxSymbols
+                )
+
+                tdtTraceEmitter?(
+                    TDTTraceStep(
+                        row: row,
+                        time: currentTime,
+                        newSymbols: currentNewSymbols,
+                        token: token,
+                        decisionIndex: decisionIndex,
+                        committedState: token != blankToken
+                    )
+                )
+
+                if token != blankToken {
+                    committedRows[activeIndex] = true
+                    lastTokenByRow[row] = token
+
+                    if !ParakeetTokenizer.isSpecialToken(token, vocabulary: vocabulary) {
+                        hypothesisByRow[row].append(
+                            ParakeetAlignedToken(
+                                id: token,
+                                text: ParakeetTokenizer.decode(tokens: [token], vocabulary: vocabulary),
+                                start: frameTimeSeconds(frameIndex: currentTime),
+                                duration: frameTimeSeconds(frameIndex: step.jump)
+                            )
+                        )
+                    }
+                }
+
+                timeByRow[row] = step.nextTime
+                newSymbolsByRow[row] = step.nextNewSymbols
+                doneByRow[row] = step.nextTime >= maxLengthByRow[row]
+            }
+
+            fullState = mergeUpdatedState(fullState, activeRows: activeRows, updatedState: proposedState, committedRows: committedRows)
+        }
+
+        return hypothesisByRow.map { hypothesis in
+            ParakeetAlignment.sentencesToResult(
+                ParakeetAlignment.tokensToSentences(hypothesis)
+            )
+        }
+    }
+
+    private func gatherActiveFrames(
+        batchFeatures: MLXArray,
+        activeRows: [Int],
+        timeByRow: [Int]
+    ) -> MLXArray {
+        let gathered = activeRows.map { row in
+            let time = timeByRow[row]
+            return batchFeatures[row..<(row + 1), time..<(time + 1), 0...]
+        }
+
+        if gathered.count == 1 {
+            return gathered[0]
+        }
+        return MLX.concatenated(gathered, axis: 0)
+    }
+
+    private func gatherActiveState(_ state: ParakeetLSTMState, activeRows: [Int]) -> ParakeetLSTMState {
+        func gather(_ array: MLXArray?) -> MLXArray? {
+            guard let array else { return nil }
+            let slices = activeRows.map { row in
+                array[0..., row..<(row + 1), 0...]
+            }
+
+            if slices.count == 1 {
+                return slices[0]
+            }
+            return MLX.concatenated(slices, axis: 1)
+        }
+
+        return (hidden: gather(state.hidden), cell: gather(state.cell))
+    }
+
+    private func mergeUpdatedState(
+        _ state: ParakeetLSTMState,
+        activeRows: [Int],
+        updatedState: ParakeetLSTMState,
+        committedRows: [Bool]
+    ) -> ParakeetLSTMState {
+        func merge(_ original: MLXArray?, _ updated: MLXArray?) -> MLXArray? {
+            guard let original, let updated else { return original }
+            guard !activeRows.isEmpty else { return original }
+
+            var rowSlices = (0..<original.shape[1]).map { row in
+                original[0..., row..<(row + 1), 0...]
+            }
+            let updatedSlices = updated.split(parts: activeRows.count, axis: 1)
+
+            for (index, row) in activeRows.enumerated() where committedRows[index] {
+                rowSlices[row] = updatedSlices[index]
+            }
+
+            if rowSlices.count == 1 {
+                return rowSlices[0]
+            }
+            return MLX.concatenated(rowSlices, axis: 1)
+        }
+
+        return (
+            hidden: merge(state.hidden, updatedState.hidden),
+            cell: merge(state.cell, updatedState.cell)
+        )
     }
 
     private func decodeRNNT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
