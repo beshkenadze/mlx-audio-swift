@@ -206,6 +206,79 @@ struct ParakeetBatchParityTests {
         #expect(batched.1.cell?.shape == [1, 2, 8])
     }
 
+    @Test("Compiled encoder matches uncompiled Parakeet encoder output")
+    func compiledEncoderMatchesUncompiledParakeetEncoderOutput() throws {
+        let model = try makeTDTFixtureModel()
+        let audios = [
+            makeChunkAudio(sampleCount: 4_800, frequency: 180),
+            makeChunkAudio(sampleCount: 8_000, frequency: 260),
+            makeChunkAudio(sampleCount: 12_800, frequency: 340),
+        ]
+        let batchFeatures = model.makeBatchFeatures(audios)
+
+        model.encoderExecutionImplementation = .plain
+        let plainEncoded = model.encodeBatchFeatures(batchFeatures.features, lengths: batchFeatures.lengths)
+        eval(plainEncoded.0, plainEncoded.1)
+
+        model.encoderExecutionImplementation = .compiled
+        let compiledEncoded = model.encodeBatchFeatures(batchFeatures.features, lengths: batchFeatures.lengths)
+        eval(compiledEncoded.0, compiledEncoded.1)
+
+        #expect(plainEncoded.1.asArray(Int32.self) == compiledEncoded.1.asArray(Int32.self))
+        #expect(plainEncoded.0.shape == compiledEncoded.0.shape)
+        #expect(plainEncoded.0.asArray(Float.self) == compiledEncoded.0.asArray(Float.self))
+
+        model.tdtDecoderImplementation = .serial
+        let plainDecoded = model.decodeEncoded(batchFeatures: plainEncoded.0, lengths: plainEncoded.1)
+        let compiledDecoded = model.decodeEncoded(batchFeatures: compiledEncoded.0, lengths: compiledEncoded.1)
+
+        #expect(plainDecoded.map(alignedResultSignature) == compiledDecoded.map(alignedResultSignature))
+    }
+
+    @Test("Parakeet stage benchmark harness measures mel encoder decode and full batch")
+    func parakeetStageBenchmarkHarnessMeasuresMelEncoderDecodeAndFullBatch() throws {
+        let model = try makeTDTFixtureModel()
+        let audios = [
+            makeChunkAudio(sampleCount: 4_800, frequency: 180),
+            makeChunkAudio(sampleCount: 8_000, frequency: 260),
+            makeChunkAudio(sampleCount: 12_800, frequency: 340),
+        ]
+
+        let melTimed = measureWallClock {
+            model.makeBatchFeatures(audios)
+        }
+
+        model.encoderExecutionImplementation = .plain
+        let encoderTimed = measureWallClock {
+            model.encodeBatchFeatures(melTimed.value.features, lengths: melTimed.value.lengths)
+        }
+
+        model.tdtDecoderImplementation = .serial
+        let decodeTimed = measureWallClock {
+            model.decodeEncoded(batchFeatures: encoderTimed.value.0, lengths: encoderTimed.value.1)
+        }
+
+        let fullTimed = try measureWallClock {
+            try model.generateBatch(audios: audios)
+        }
+
+        let result = ParakeetStageBenchmarkResult(
+            batchSize: audios.count,
+            melWallClock: melTimed.wallClock,
+            encoderWallClock: encoderTimed.wallClock,
+            decodeWallClock: decodeTimed.wallClock,
+            fullBatchWallClock: fullTimed.wallClock
+        )
+
+        #expect(result.batchSize == 3)
+        #expect(result.melWallClock >= 0)
+        #expect(result.encoderWallClock >= 0)
+        #expect(result.decodeWallClock >= 0)
+        #expect(result.fullBatchWallClock >= 0)
+        #expect(!result.summary.isEmpty)
+        #expect(decodeTimed.value.map(alignedResultSignature) == fullTimed.value.map(outputSignature))
+    }
+
     @Test("generateBatch normalizes multichannel audio to mono before mel extraction")
     func generateBatchNormalizesMultichannelAudioToMono() throws {
         let model = try makeFixtureModel()
@@ -433,6 +506,22 @@ private struct BatchBenchmarkResult {
     }
 }
 
+private struct ParakeetStageBenchmarkResult {
+    let batchSize: Int
+    let melWallClock: TimeInterval
+    let encoderWallClock: TimeInterval
+    let decodeWallClock: TimeInterval
+    let fullBatchWallClock: TimeInterval
+
+    var summary: String {
+        let mel = String(format: "%.6f", melWallClock)
+        let encoder = String(format: "%.6f", encoderWallClock)
+        let decode = String(format: "%.6f", decodeWallClock)
+        let fullBatch = String(format: "%.6f", fullBatchWallClock)
+        return "batch_size=\(batchSize) mel=\(mel) encoder=\(encoder) decode=\(decode) full_batch=\(fullBatch)"
+    }
+}
+
 private typealias TDTTraceStep = ParakeetModel.TDTTraceStep
 private typealias TDTTraceEmitter = @Sendable (TDTTraceStep) -> Void
 
@@ -657,6 +746,18 @@ private func outputSignature(_ output: STTOutput) -> String {
         return "\(text)@\(formattedStart)-\(formattedEnd)"
     }
     return "\(output.text)|\(segments.joined(separator: ","))"
+}
+
+private func alignedResultSignature(_ result: ParakeetAlignedResult) -> String {
+    let segments = (result.segments).map { segment -> String in
+        let text = segment["text"] as? String ?? ""
+        let start = segment["start"] as? Double ?? -1
+        let end = segment["end"] as? Double ?? -1
+        let formattedStart = String(format: "%.5f", start)
+        let formattedEnd = String(format: "%.5f", end)
+        return "\(text)@\(formattedStart)-\(formattedEnd)"
+    }
+    return "\(result.text)|\(segments.joined(separator: ","))"
 }
 
 private func measureWallClock<T>(_ body: () throws -> T) rethrows -> (value: T, wallClock: TimeInterval) {

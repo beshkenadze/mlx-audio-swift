@@ -26,6 +26,11 @@ public final class ParakeetModel: Module, STTGenerationModel {
         case hybrid
     }
 
+    enum EncoderExecutionImplementation: Sendable {
+        case plain
+        case compiled
+    }
+
     struct TDTTraceStep: Sendable, Equatable {
         let row: Int
         let time: Int
@@ -41,7 +46,9 @@ public final class ParakeetModel: Module, STTGenerationModel {
     @ModuleInfo(key: "ctc_decoder") var ctcDecoder: ParakeetConvASRDecoder?
 
     var tdtDecoderImplementation: TDTDecoderImplementation?
+    var encoderExecutionImplementation: EncoderExecutionImplementation?
     var tdtTraceEmitter: (@Sendable (TDTTraceStep) -> Void)?
+    private var compiledEncoderFeaturesByShape: [String: @Sendable (MLXArray) -> MLXArray] = [:]
 
     public var defaultGenerationParameters: STTGenerateParameters {
         STTGenerateParameters(
@@ -152,11 +159,16 @@ public final class ParakeetModel: Module, STTGenerationModel {
         }
 
         let previousTDTDecoderImplementation = tdtDecoderImplementation
+        let previousEncoderExecutionImplementation = encoderExecutionImplementation
         if previousTDTDecoderImplementation == nil {
             tdtDecoderImplementation = audios.count > 1 ? .hybrid : .serial
         }
+        if previousEncoderExecutionImplementation == nil {
+            encoderExecutionImplementation = .compiled
+        }
         defer {
             tdtDecoderImplementation = previousTDTDecoderImplementation
+            encoderExecutionImplementation = previousEncoderExecutionImplementation
         }
 
         let batchFeatures = makeBatchFeatures(audios)
@@ -277,9 +289,56 @@ public final class ParakeetModel: Module, STTGenerationModel {
         return decoder.predictBatched(tokenIds, state: state, blankToken: blankToken)
     }
 
-    private func decodeTDT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
-        guard let decoder, let joint else { return [] }
+    func encodeBatchFeatures(_ features: MLXArray, lengths: MLXArray? = nil) -> (MLXArray, MLXArray) {
+        let resolvedLengths = lengths ?? MLXArray(Array(repeating: Int32(features.shape[1]), count: features.shape[0])).asType(.int32)
+        switch encoderExecutionImplementation ?? .plain {
+        case .plain:
+            return encoder(features, lengths: resolvedLengths)
+        case .compiled:
+            let encodedFeatures = compiledEncoderFeatures(for: features)(features)
+            let encodedLengths = computeEncodedLengths(from: resolvedLengths)
+            return (encodedFeatures, encodedLengths)
+        }
+    }
 
+    func compiledEncoderFeatures(for features: MLXArray) -> @Sendable (MLXArray) -> MLXArray {
+        let key = "\(features.shape)-\(features.dtype)"
+        if let compiled = compiledEncoderFeaturesByShape[key] {
+            return compiled
+        }
+
+        let compiled: @Sendable (MLXArray) -> MLXArray = compile { [self] features in
+            self.encoder(features).0
+        }
+        compiledEncoderFeaturesByShape[key] = compiled
+        return compiled
+    }
+
+    func computeEncodedLengths(from lengths: MLXArray) -> MLXArray {
+        guard encoder.preEncodeDw != nil else {
+            return lengths.asType(.int32)
+        }
+
+        let samplingNum = Int(log2(Double(encoderConfig.subsamplingFactor)))
+        var outLengths = lengths.asType(.float32)
+        for _ in 0..<samplingNum {
+            outLengths = floor((outLengths + Float(-1)) / Float(2)) + 1
+        }
+        return outLengths.asType(.int32)
+    }
+
+    func decodeEncoded(batchFeatures: MLXArray, lengths: MLXArray) -> [ParakeetAlignedResult] {
+        switch variant {
+        case .tdt, .tdtCtc:
+            return decodeTDTEncoded(batchFeatures: batchFeatures, lengths: lengths)
+        case .rnnt:
+            return decodeRNNTEncoded(batchFeatures: batchFeatures, lengths: lengths)
+        case .ctc:
+            return decodeCTCEncoded(batchFeatures: batchFeatures, lengths: lengths)
+        }
+    }
+
+    private func decodeTDT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
         var features = mel
         if features.ndim == 2 {
             features = features.expandedDimensions(axis: 0)
@@ -290,12 +349,16 @@ public final class ParakeetModel: Module, STTGenerationModel {
             "Parakeet TDT input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
         )
 
-        let encoded = encoder(features, lengths: lengths)
-        let batchFeatures = encoded.0
-        let lengths = encoded.1
+        let encoded = encodeBatchFeatures(features, lengths: lengths)
+        return decodeTDTEncoded(batchFeatures: encoded.0, lengths: encoded.1)
+    }
+
+    private func decodeTDTEncoded(batchFeatures: MLXArray, lengths: MLXArray) -> [ParakeetAlignedResult] {
+        guard let decoder, let joint else { return [] }
+
         assert(
             batchFeatures.ndim == 3 && batchFeatures.shape[2] == encoderConfig.dModel,
-            "Parakeet TDT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
+            "Parakeet TDT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape)"
         )
         eval(batchFeatures, lengths)
 
@@ -575,8 +638,6 @@ public final class ParakeetModel: Module, STTGenerationModel {
     }
 
     private func decodeRNNT(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
-        guard let decoder, let joint else { return [] }
-
         var features = mel
         if features.ndim == 2 {
             features = features.expandedDimensions(axis: 0)
@@ -587,12 +648,16 @@ public final class ParakeetModel: Module, STTGenerationModel {
             "Parakeet RNNT input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
         )
 
-        let encoded = encoder(features, lengths: lengths)
-        let batchFeatures = encoded.0
-        let lengths = encoded.1
+        let encoded = encodeBatchFeatures(features, lengths: lengths)
+        return decodeRNNTEncoded(batchFeatures: encoded.0, lengths: encoded.1)
+    }
+
+    private func decodeRNNTEncoded(batchFeatures: MLXArray, lengths: MLXArray) -> [ParakeetAlignedResult] {
+        guard let decoder, let joint else { return [] }
+
         assert(
             batchFeatures.ndim == 3 && batchFeatures.shape[2] == encoderConfig.dModel,
-            "Parakeet RNNT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
+            "Parakeet RNNT encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape)"
         )
         eval(batchFeatures, lengths)
 
@@ -665,8 +730,6 @@ public final class ParakeetModel: Module, STTGenerationModel {
     }
 
     private func decodeCTC(mel: MLXArray, lengths: MLXArray? = nil) -> [ParakeetAlignedResult] {
-        guard let ctcDecoder else { return [] }
-
         var features = mel
         if features.ndim == 2 {
             features = features.expandedDimensions(axis: 0)
@@ -677,12 +740,16 @@ public final class ParakeetModel: Module, STTGenerationModel {
             "Parakeet CTC input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
         )
 
-        let encoded = encoder(features, lengths: lengths)
-        let batchFeatures = encoded.0
-        let lengths = encoded.1
+        let encoded = encodeBatchFeatures(features, lengths: lengths)
+        return decodeCTCEncoded(batchFeatures: encoded.0, lengths: encoded.1)
+    }
+
+    private func decodeCTCEncoded(batchFeatures: MLXArray, lengths: MLXArray) -> [ParakeetAlignedResult] {
+        guard let ctcDecoder else { return [] }
+
         assert(
             batchFeatures.ndim == 3 && batchFeatures.shape[2] == encoderConfig.dModel,
-            "Parakeet CTC encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape) from input \(features.shape)"
+            "Parakeet CTC encoder output shape mismatch: expected last dim \(encoderConfig.dModel), got \(batchFeatures.shape)"
         )
         let logits = ctcDecoder(batchFeatures)
         eval(logits, lengths)
@@ -727,7 +794,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         audio.ndim > 1 ? audio.mean(axis: -1) : audio
     }
 
-    private func makeBatchFeatures(_ audios: [MLXArray]) -> (features: MLXArray, lengths: MLXArray) {
+    func makeBatchFeatures(_ audios: [MLXArray]) -> (features: MLXArray, lengths: MLXArray) {
         let melFeatures = audios.map { makeMelFeatures(from: normalizeAudioToMono($0)) }
         assert(
             melFeatures.allSatisfy { $0.ndim == 2 && $0.shape[1] == preprocessConfig.features },
