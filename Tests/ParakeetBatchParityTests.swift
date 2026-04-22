@@ -139,6 +139,130 @@ struct ParakeetBatchParityTests {
         #expect(benchmark.maxFrameLength > 0)
         #expect(benchmark.peakRSSBytes > 0)
     }
+
+    @Test("Parakeet pre-encoder preserves dModel for mixed-length batch")
+    func parakeetPreEncoderPreservesDModelForMixedLengthBatch() throws {
+        let configJSON = """
+        {
+          "feat_in": 128,
+          "n_layers": 1,
+          "d_model": 1024,
+          "n_heads": 8,
+          "ff_expansion_factor": 4,
+          "subsampling_factor": 8,
+          "self_attention_model": "rel_pos",
+          "subsampling": "dw_striding",
+          "conv_kernel_size": 9,
+          "subsampling_conv_channels": 256,
+          "pos_emb_max_len": 2048,
+          "causal_downsampling": false,
+          "use_bias": false,
+          "xscaling": false,
+          "subsampling_conv_chunking_factor": 1
+        }
+        """
+
+        let config = try JSONDecoder().decode(ParakeetConformerConfig.self, from: Data(configJSON.utf8))
+        let encoder = ParakeetConformer(args: config)
+        let preEncoder = try #require(encoder.preEncodeDw)
+
+        let lengths = MLXArray([1043, 1001, 977, 913, 881, 799, 643, 511]).asType(.int32)
+        let maxFrames = 1043
+        let batch = lengths.shape[0]
+        let features = MLXArray.zeros([batch, maxFrames, 128], type: Float.self)
+
+        let preEncoded = preEncoder(features, lengths: lengths)
+
+        #expect(preEncoded.0.ndim == 3)
+        #expect(preEncoded.0.shape[0] == batch)
+        #expect(preEncoded.0.shape[2] == 1024)
+        eval(preEncoded.0)
+        let preEncodedValues = preEncoded.0.asArray(Float.self)
+        #expect(preEncodedValues.count == batch * preEncoded.0.shape[1] * 1024)
+    }
+
+    @Test("Parakeet first-layer linearQ preserves dModel for mixed-length batch")
+    func parakeetFirstLayerLinearQPreservesDModelForMixedLengthBatch() throws {
+        let configJSON = """
+        {
+          "feat_in": 128,
+          "n_layers": 1,
+          "d_model": 1024,
+          "n_heads": 8,
+          "ff_expansion_factor": 4,
+          "subsampling_factor": 8,
+          "self_attention_model": "rel_pos",
+          "subsampling": "dw_striding",
+          "conv_kernel_size": 9,
+          "subsampling_conv_channels": 256,
+          "pos_emb_max_len": 2048,
+          "causal_downsampling": false,
+          "use_bias": false,
+          "xscaling": false,
+          "subsampling_conv_chunking_factor": 1
+        }
+        """
+
+        let config = try JSONDecoder().decode(ParakeetConformerConfig.self, from: Data(configJSON.utf8))
+        let encoder = ParakeetConformer(args: config)
+        let preEncoder = try #require(encoder.preEncodeDw)
+
+        let lengths = MLXArray([1043, 1001, 977, 913, 881, 799, 643, 511]).asType(.int32)
+        let maxFrames = 1043
+        let batch = lengths.shape[0]
+        let features = MLXArray.zeros([batch, maxFrames, 128], type: Float.self)
+
+        let preEncoded = preEncoder(features, lengths: lengths)
+
+        let firstLayer = encoder.layers[0]
+        let xNorm = firstLayer.normSelfAtt(preEncoded.0)
+        #expect(xNorm.shape[2] == 1024)
+
+        let relSelfAttn = try #require(firstLayer.relSelfAttn)
+        let qProj = relSelfAttn.linearQ(xNorm)
+        #expect(qProj.shape[2] == 1024)
+        eval(qProj)
+        let qProjValues = qProj.asArray(Float.self)
+        #expect(qProjValues.count == batch * qProj.shape[1] * 1024)
+    }
+
+    @Test("Parakeet full conformer preserves dModel for mixed-length batch")
+    func parakeetConformerPreservesDModelForMixedLengthBatch() throws {
+        let configJSON = """
+        {
+          "feat_in": 128,
+          "n_layers": 1,
+          "d_model": 1024,
+          "n_heads": 8,
+          "ff_expansion_factor": 4,
+          "subsampling_factor": 8,
+          "self_attention_model": "rel_pos",
+          "subsampling": "dw_striding",
+          "conv_kernel_size": 9,
+          "subsampling_conv_channels": 256,
+          "pos_emb_max_len": 2048,
+          "causal_downsampling": false,
+          "use_bias": false,
+          "xscaling": false,
+          "subsampling_conv_chunking_factor": 1
+        }
+        """
+
+        let config = try JSONDecoder().decode(ParakeetConformerConfig.self, from: Data(configJSON.utf8))
+        let encoder = ParakeetConformer(args: config)
+
+        let lengths = MLXArray([1043, 1001, 977, 913, 881, 799, 643, 511]).asType(.int32)
+        let maxFrames = 1043
+        let batch = lengths.shape[0]
+        let features = MLXArray.zeros([batch, maxFrames, 128], type: Float.self)
+
+        let encoded = encoder(features, lengths: lengths)
+
+        #expect(encoded.0.ndim == 3)
+        #expect(encoded.0.shape[0] == batch)
+        #expect(encoded.0.shape[2] == 1024)
+        #expect(encoded.1.shape[0] == batch)
+    }
 }
 
 private struct BatchBenchmarkResult {
