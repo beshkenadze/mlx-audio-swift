@@ -401,10 +401,10 @@ public final class ParakeetModel: Module, STTGenerationModel {
             var t = 0
             var newSymbols = 0
             var state = makeInitialDecoderState(batchSize: 1, dtype: featureSeq.dtype)
+            var currentToken = MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
 
             while t < maxLength {
                 let frame = featureSeq[0..., t..<(t + 1), 0...]
-                let currentToken = MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
 
                 let stepOutputs = compiledTDTStep([
                     frame,
@@ -443,6 +443,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
                 if token != blankToken {
                     lastToken = token
                     state = (hidden: hidden, cell: cell)
+                    currentToken = MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
                     if !ParakeetTokenizer.isSpecialToken(token, vocabulary: vocabulary) {
                         let start = frameTimeSeconds(frameIndex: t)
                         let duration = frameTimeSeconds(frameIndex: step.jump)
