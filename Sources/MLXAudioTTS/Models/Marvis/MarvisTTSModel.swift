@@ -25,7 +25,7 @@ public final class MarvisTTSModel: Module {
     
     private let model: CSMModel
     private let _promptURLs: [URL]?
-    private let _textTokenizer: Tokenizer
+    private let _textTokenizer: TextTokenizer
     private let _audio_tokenizer: MimiTokenizer
     private let _streamingDecoder: MimiStreamingDecoder
     
@@ -33,7 +33,7 @@ public final class MarvisTTSModel: Module {
         config: CSMModelArgs,
         repoId: String,
         promptURLs: [URL]? = nil,
-        textTokenizer: Tokenizer,
+        textTokenizer: TextTokenizer,
         audioTokenizer: MimiTokenizer
     ) {
         _ = repoId
@@ -55,7 +55,21 @@ public final class MarvisTTSModel: Module {
         promptURLs: [URL]? = nil,
         progressHandler: @Sendable @escaping (Progress) -> Void
     ) async throws {
-        let textTokenizer = try await loadTokenizer(configuration: ModelConfiguration(id: repoId), hub: hub)
+        let tokenizerDirectory = try await hub.snapshot(
+            from: repoId,
+            matching: [
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "tokenizer.model",
+                "special_tokens_map.json",
+                "added_tokens.json",
+                "chat_template.*",
+                "vocab.*",
+                "merges.txt",
+            ],
+            progressHandler: progressHandler
+        )
+        let textTokenizer = try await AutoTokenizer.from(modelFolder: tokenizerDirectory)
         let codec = try await Mimi.fromPretrained(progressHandler: progressHandler)
         let audioTokenizer = MimiTokenizer(codec)
         self.init(
