@@ -412,13 +412,13 @@ public final class ParakeetModel: Module, STTGenerationModel {
                     state.hidden!,
                     state.cell!
                 ])
-                let predToken = stepOutputs[0]
-                let decision = stepOutputs[1]
-                let hidden = stepOutputs[2]
-                let cell = stepOutputs[3]
-                eval(predToken, decision, hidden, cell)
-                let token = Int(predToken.item(Int32.self))
-                let decisionIndex = Int(decision.item(Int32.self))
+                let decisions = stepOutputs[0]
+                let hidden = stepOutputs[1]
+                let cell = stepOutputs[2]
+                MLX.eval(decisions, hidden, cell)
+                let decisionPair = decisions.asArray(Int32.self)
+                let token = Int(decisionPair[0])
+                let decisionIndex = Int(decisionPair[1])
                 let step = ParakeetDecodingLogic.tdtStep(
                     predictedToken: token,
                     blankToken: blankToken,
@@ -886,7 +886,7 @@ private func makeCompiledTDTStep(
 ) -> @Sendable ([MLXArray]) -> [MLXArray] {
     guard let decoder, let joint else {
         return { arrays in
-            [MLXArray(Int32(0)), MLXArray(Int32(0)), arrays[2], arrays[3]]
+            [MLXArray([Int32(0), Int32(0)]), arrays[2], arrays[3]]
         }
     }
 
@@ -913,7 +913,8 @@ private func makeCompiledTDTStep(
         let durationLogits = jointOut[0, 0, 0, (blankTokenId + 1)...]
         let predToken = tokenLogits.argMax(axis: -1).asType(.int32)
         let decision = durationLogits.argMax(axis: -1).asType(.int32)
-        return [predToken, decision, hiddenOut, cellOut]
+        let decisions = MLX.stacked([predToken, decision], axis: 0)
+        return [decisions, hiddenOut, cellOut]
     }
 }
 
