@@ -21,6 +21,11 @@ public final class ParakeetModel: Module, STTGenerationModel {
     public let durations: [Int]
     public let maxSymbols: Int?
 
+    /// Compute dtype applied to encoder features and decoder LSTM state.
+    /// Defaults to `.bfloat16` (measured ~8% wall-clock speedup on batched decode
+    /// with ~0.2% word drift). Set to `.float32` via the factory method to fall back.
+    public var computeDType: DType = .bfloat16
+
     enum TDTDecoderImplementation: Sendable {
         case serial
         case hybrid
@@ -359,27 +364,9 @@ public final class ParakeetModel: Module, STTGenerationModel {
             "Parakeet TDT input feature shape mismatch: expected [B, T, \(preprocessConfig.features)], got \(features.shape)"
         )
 
-        // TEMPORARY (feat-branch only — REMOVE before upstream PR): PARAKEET_BF16=1 env gate.
-        // BF16 experiment. Upstream PR must replace this with either default-on bf16 or a
-        // proper config surface (e.g. ParakeetPreprocessConfig.precision). See docs/parakeet-ship-checklist.md.
-        if ProcessInfo.processInfo.environment["PARAKEET_BF16"] == "1" {
-            features = features.asType(.bfloat16)
-        }
-
-        // TEMPORARY (feat-branch only — REMOVE before upstream PR): PARAKEET_PROFILE=1 harness.
-        // Encoder/decoder wall-clock split for perf analysis. Forces MLX.eval between stages to
-        // defeat lazy eval. Zero cost when env var unset. See docs/parakeet-ship-checklist.md.
-        let profile = ProcessInfo.processInfo.environment["PARAKEET_PROFILE"] == "1"
-        let t0 = profile ? CFAbsoluteTimeGetCurrent() : 0
+        features = features.asType(computeDType)
         let encoded = encodeBatchFeatures(features, lengths: lengths)
-        if profile { MLX.eval(encoded.0, encoded.1) }
-        let t1 = profile ? CFAbsoluteTimeGetCurrent() : 0
-        let out = decodeTDTEncoded(batchFeatures: encoded.0, lengths: encoded.1)
-        if profile {
-            let t2 = CFAbsoluteTimeGetCurrent()
-            ParakeetTDTProfile.shared.add(encoder: t1 - t0, decoder: t2 - t1)
-        }
-        return out
+        return decodeTDTEncoded(batchFeatures: encoded.0, lengths: encoded.1)
     }
 
     private func decodeTDTEncoded(batchFeatures: MLXArray, lengths: MLXArray) -> [ParakeetAlignedResult] {
@@ -419,7 +406,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
             var t = 0
             var newSymbols = 0
-            var state = makeInitialDecoderState(batchSize: 1, dtype: featureSeq.dtype)
+            var state = makeInitialDecoderState(batchSize: 1, dtype: computeDType)
             var currentToken = MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
 
             while t < maxLength {
@@ -504,12 +491,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         let numLayers = decoder.prediction.decRnn.numLayers
         let stateShape = [numLayers, batchSize, hiddenSize]
 
-        // TEMPORARY (feat-branch only — REMOVE before upstream PR): PARAKEET_BF16=1 env gate.
-        // When gated, forces hybrid state init to bf16 to guard against fp32 contamination.
-        // Upstream PR: drop env check, use batchFeatures.dtype unconditionally. See docs/parakeet-ship-checklist.md.
-        let stateDType: DType = ProcessInfo.processInfo.environment["PARAKEET_BF16"] == "1"
-            ? .bfloat16
-            : batchFeatures.dtype
+        let stateDType: DType = computeDType
         var fullState: ParakeetLSTMState = (
             hidden: MLXArray.zeros(stateShape, dtype: stateDType),
             cell: MLXArray.zeros(stateShape, dtype: stateDType)
@@ -880,13 +862,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         let decRnn = decoder.prediction.decRnn
         let hiddenSize = decRnn.layers.first?.hiddenSize ?? decoder.predHidden
         let shape = [decRnn.numLayers, batchSize, hiddenSize]
-        // TEMPORARY (feat-branch only — REMOVE before upstream PR): PARAKEET_BF16=1 env gate.
-        // Upstream PR: drop env check, use `dtype` (caller-provided) unconditionally.
-        // See docs/parakeet-ship-checklist.md.
-        let targetDType: DType = ProcessInfo.processInfo.environment["PARAKEET_BF16"] == "1"
-            ? .bfloat16
-            : dtype
-        let zeros = MLXArray.zeros(shape, type: Float.self).asType(targetDType)
+        let zeros = MLXArray.zeros(shape, type: Float.self).asType(dtype)
         return (hidden: zeros, cell: zeros)
     }
 
@@ -967,7 +943,10 @@ public extension ParakeetModel {
         return Data(text.utf8)
     }
 
-    static func fromDirectory(_ modelDir: URL) throws -> ParakeetModel {
+    static func fromDirectory(
+        _ modelDir: URL,
+        computeDType: DType = .bfloat16
+    ) throws -> ParakeetModel {
         let configURL = modelDir.appendingPathComponent("config.json")
         let rawConfigData = try Data(contentsOf: configURL)
         let configData = normalizedConfigData(rawConfigData)
@@ -1052,20 +1031,20 @@ public extension ParakeetModel {
 
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: .all)
 
-        // TEMPORARY (feat-branch only — REMOVE before upstream PR): PARAKEET_BF16=1 env gate.
-        // Casts all float params to bf16 after load; skips uint32 packed quantized weights.
-        // Upstream PR: make this default behavior or add config flag. See docs/parakeet-ship-checklist.md.
-        if ProcessInfo.processInfo.environment["PARAKEET_BF16"] == "1" {
-            let casted = Dictionary(
-                uniqueKeysWithValues: model.parameters().flattened().map { key, value -> (String, MLXArray) in
-                    guard value.dtype.isFloatingPoint, value.dtype != .bfloat16 else {
-                        return (key, value)
-                    }
-                    return (key, value.asType(.bfloat16))
+        model.computeDType = computeDType
+
+        // Cast all floating-point params to computeDType after load.
+        // Skips params already matching target dtype and leaves non-float (e.g. uint32
+        // packed quantized) weights untouched.
+        let casted = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().map { key, value -> (String, MLXArray) in
+                guard value.dtype.isFloatingPoint, value.dtype != computeDType else {
+                    return (key, value)
                 }
-            )
-            try model.update(parameters: ModuleParameters.unflattened(casted), verify: .noUnusedKeys)
-        }
+                return (key, value.asType(computeDType))
+            }
+        )
+        try model.update(parameters: ModuleParameters.unflattened(casted), verify: .noUnusedKeys)
 
         model.train(false)
         eval(model)
@@ -1074,6 +1053,7 @@ public extension ParakeetModel {
 
     static func fromPretrained(
         _ modelPath: String,
+        computeDType: DType = .bfloat16,
         cache: HubCache = .default
     ) async throws -> ParakeetModel {
         let hfToken: String? = ProcessInfo.processInfo.environment["HF_TOKEN"]
@@ -1093,7 +1073,7 @@ public extension ParakeetModel {
             hfToken: hfToken,
             cache: cache
         )
-        return try fromDirectory(modelDir)
+        return try fromDirectory(modelDir, computeDType: computeDType)
     }
 }
 
@@ -1221,22 +1201,3 @@ private extension Array {
     }
 }
 
-// TEMPORARY (feat-branch only — REMOVE before upstream PR): profiling instrumentation.
-// Accumulates encoder/decoder wall-clock split across batch steps when PARAKEET_PROFILE=1.
-// Delete this entire class plus the gated block in decodeTDT. See docs/parakeet-ship-checklist.md.
-final class ParakeetTDTProfile: @unchecked Sendable {
-    static let shared = ParakeetTDTProfile()
-    private let lock = NSLock()
-    private var enc: Double = 0
-    private var dec: Double = 0
-    private var n: Int = 0
-    func add(encoder: Double, decoder: Double) {
-        lock.lock()
-        defer { lock.unlock() }
-        enc += encoder
-        dec += decoder
-        n += 1
-        fputs(String(format: "[parakeet-prof] step %d enc=%.3fs dec=%.3fs cum enc=%.3fs dec=%.3fs\n",
-                     n, encoder, decoder, enc, dec), stderr)
-    }
-}

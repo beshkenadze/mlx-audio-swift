@@ -110,10 +110,9 @@ final class ParakeetRelPositionMultiHeadAttention: ParakeetMultiHeadAttention {
         }
 
         let qHeads = qProj.reshaped(batch, qSeq, nHead, headDim)
-        // BF16 experiment — gated by PARAKEET_BF16=1. posBiasU/V are plain `var MLXArray`,
-        // not enumerated by model.parameters(), so the weight-cast pass misses them and they
-        // stay fp32. Casting at use-site prevents bf16+fp32 promotion that would force
-        // `_float32` SDPA kernel dispatch in the Conformer hot path.
+        // Cast posBiasU/V to qHeads.dtype at use-site to prevent dtype promotion
+        // if params fall out of sync with activations (defense in depth alongside
+        // the @ParameterInfo registration + model-wide cast pass at load).
         let qU = (qHeads + posBiasU.asType(qHeads.dtype)).transposed(0, 2, 1, 3)
         let qV = (qHeads + posBiasV.asType(qHeads.dtype)).transposed(0, 2, 1, 3)
 
