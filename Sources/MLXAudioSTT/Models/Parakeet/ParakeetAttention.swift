@@ -60,8 +60,8 @@ class ParakeetMultiHeadAttention: Module {
 final class ParakeetRelPositionMultiHeadAttention: ParakeetMultiHeadAttention {
     @ModuleInfo(key: "linear_pos") var linearPos: Linear
 
-    var posBiasU: MLXArray
-    var posBiasV: MLXArray
+    @ParameterInfo var posBiasU: MLXArray
+    @ParameterInfo var posBiasV: MLXArray
 
     init(
         nHead: Int,
@@ -71,8 +71,8 @@ final class ParakeetRelPositionMultiHeadAttention: ParakeetMultiHeadAttention {
         posBiasV: MLXArray? = nil
     ) {
         self._linearPos.wrappedValue = Linear(nFeat, nFeat, bias: false)
-        self.posBiasU = posBiasU ?? MLXArray.zeros([nHead, nFeat / nHead], type: Float.self)
-        self.posBiasV = posBiasV ?? MLXArray.zeros([nHead, nFeat / nHead], type: Float.self)
+        self._posBiasU.wrappedValue = posBiasU ?? MLXArray.zeros([nHead, nFeat / nHead], type: Float.self)
+        self._posBiasV.wrappedValue = posBiasV ?? MLXArray.zeros([nHead, nFeat / nHead], type: Float.self)
         super.init(nHead: nHead, nFeat: nFeat, bias: bias)
     }
 
@@ -110,8 +110,12 @@ final class ParakeetRelPositionMultiHeadAttention: ParakeetMultiHeadAttention {
         }
 
         let qHeads = qProj.reshaped(batch, qSeq, nHead, headDim)
-        let qU = (qHeads + posBiasU).transposed(0, 2, 1, 3)
-        let qV = (qHeads + posBiasV).transposed(0, 2, 1, 3)
+        // BF16 experiment — gated by PARAKEET_BF16=1. posBiasU/V are plain `var MLXArray`,
+        // not enumerated by model.parameters(), so the weight-cast pass misses them and they
+        // stay fp32. Casting at use-site prevents bf16+fp32 promotion that would force
+        // `_float32` SDPA kernel dispatch in the Conformer hot path.
+        let qU = (qHeads + posBiasU.asType(qHeads.dtype)).transposed(0, 2, 1, 3)
+        let qV = (qHeads + posBiasV.asType(qHeads.dtype)).transposed(0, 2, 1, 3)
 
         let kHeads = kProj.reshaped(batch, kSeq, nHead, headDim).transposed(0, 2, 1, 3)
         let vHeads = vProj.reshaped(batch, kSeq, nHead, headDim).transposed(0, 2, 1, 3)
@@ -119,7 +123,7 @@ final class ParakeetRelPositionMultiHeadAttention: ParakeetMultiHeadAttention {
 
         var matrixBD = MLX.matmul(qV, pHeads.swappedAxes(-2, -1))
         matrixBD = relShift(matrixBD)
-        matrixBD = matrixBD[0..., 0..., 0..., ..<kSeq] * scale
+        matrixBD = matrixBD[0..., 0..., 0..., ..<kSeq] * MLXArray(scale).asType(matrixBD.dtype)
 
         if let mask {
             matrixBD = matrixBD + mask
@@ -179,7 +183,7 @@ final class ParakeetRelPositionalEncoding {
             calculatePE()
         }
 
-        let scaledX = x * scaleInput
+        let scaledX = x * MLXArray(scaleInput).asType(x.dtype)
         let bufferLen = pe.shape[1]
         let start = bufferLen / 2 - (inputLength - 1)
         let end = bufferLen / 2 + (inputLength - 1) + 1
