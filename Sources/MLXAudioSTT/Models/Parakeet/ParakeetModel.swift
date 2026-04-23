@@ -486,8 +486,8 @@ public final class ParakeetModel: Module, STTGenerationModel {
         let stateShape = [numLayers, batchSize, hiddenSize]
 
         var fullState: ParakeetLSTMState = (
-            hidden: MLXArray.zeros(stateShape, type: Float.self).asType(batchFeatures.dtype),
-            cell: MLXArray.zeros(stateShape, type: Float.self).asType(batchFeatures.dtype)
+            hidden: MLXArray.zeros(stateShape, dtype: batchFeatures.dtype),
+            cell: MLXArray.zeros(stateShape, dtype: batchFeatures.dtype)
         )
 
         var timeByRow = Array(repeating: 0, count: batchSize)
