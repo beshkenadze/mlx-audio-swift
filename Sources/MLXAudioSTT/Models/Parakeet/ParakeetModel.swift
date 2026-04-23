@@ -900,7 +900,7 @@ private func makeCompiledTDTStep(
 
         let embedded = decoder.prediction.embed(currentToken)
         let blankMask = (currentToken .== blankTokenArray).expandedDimensions(axis: 2)
-        let zeroEmbedded = MLXArray.zeros(embedded.shape, type: Float.self).asType(embedded.dtype)
+        let zeroEmbedded = MLXArray.zeros(like: embedded)
         let maskedEmbedded = MLX.where(blankMask, zeroEmbedded, embedded)
 
         let decoderOut = decoder.prediction.decRnn(maskedEmbedded, state: (hidden: hidden, cell: cell))
