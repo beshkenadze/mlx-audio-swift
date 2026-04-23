@@ -519,12 +519,16 @@ public final class ParakeetModel: Module, STTGenerationModel {
             )
 
             let jointOut = joint(activeFrames, pred)
-            eval(jointOut)
-
             let tokenLogits = jointOut[0..., 0, 0, ..<(blankToken + 1)]
             let durationLogits = jointOut[0..., 0, 0, (blankToken + 1)...]
-            let predictedTokens = tokenLogits.argMax(axis: -1).asArray(Int32.self).map(Int.init)
-            let decisionIndices = durationLogits.argMax(axis: -1).asArray(Int32.self).map(Int.init)
+            let tokenArgMax = tokenLogits.argMax(axis: -1).asType(.int32)
+            let durationArgMax = durationLogits.argMax(axis: -1).asType(.int32)
+            let decisions = MLX.stacked([tokenArgMax, durationArgMax], axis: 0)
+            eval(decisions)
+            let decisionPairs = decisions.asArray(Int32.self)
+            let activeCount = activeRows.count
+            let predictedTokens = (0..<activeCount).map { Int(decisionPairs[$0]) }
+            let decisionIndices = (0..<activeCount).map { Int(decisionPairs[activeCount + $0]) }
 
             var committedRows = Array(repeating: false, count: activeRows.count)
 
