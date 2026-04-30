@@ -64,7 +64,9 @@ extension Qwen3ASRModel: STTGenerationModel {
             context: "",
             language: generationParameters.language,
             chunkDuration: generationParameters.chunkDuration,
-            minChunkDuration: generationParameters.minChunkDuration
+            minChunkDuration: generationParameters.minChunkDuration,
+            repetitionPenalty: generationParameters.repetitionPenalty,
+            repetitionContextSize: generationParameters.repetitionContextSize
         )
     }
 }
@@ -1274,10 +1276,11 @@ public class Qwen3ASRModel: Module {
             }
             generatedTokens.append(prevTokenInt)
 
-            // Heuristic guard against degenerate token loops (greedy argmax can get
-            // trapped). If last 24 tokens have <=3 unique IDs, force-stop to prevent
-            // multi-GB KV cache growth and minutes-long stalls.
-            if generatedTokens.count >= 24 {
+            // Backstop for greedy callers (penalty == 1.0): if last 24 tokens have
+            // <=3 unique IDs, force-stop to prevent multi-GB KV cache growth and
+            // minutes-long stalls. Disabled when caller opts into repetitionPenalty
+            // (the proper fix) to avoid truncating legitimately repetitive speech.
+            if repetitionPenalty == 1.0 && generatedTokens.count >= 24 {
                 let tail = generatedTokens.suffix(24)
                 if Set(tail).count <= 3 {
                     break
@@ -1418,7 +1421,9 @@ public class Qwen3ASRModel: Module {
         context: String = "",
         language: String? = nil,
         chunkDuration: Float = 1200.0,
-        minChunkDuration: Float = 1.0
+        minChunkDuration: Float = 1.0,
+        repetitionPenalty: Float = 1.0,
+        repetitionContextSize: Int = 32
     ) -> AsyncThrowingStream<STTGeneration, Error> {
         let sendableModel = UncheckedSendableBox(self)
         let sendableAudio = UncheckedSendableBox(audio)
@@ -1493,6 +1498,22 @@ public class Qwen3ASRModel: Module {
                             if temperature > 0 {
                                 lastLogits = lastLogits / temperature
                             }
+                            // Sign-aware repetition penalty (mlx-lm style): downweight
+                            // recently-seen tokens so greedy decoding can escape local
+                            // minima. Mirrors generateSingleChunk; see there for rationale.
+                            if repetitionPenalty != 1.0 && !chunkTokens.isEmpty {
+                                let contextSize = max(1, repetitionContextSize)
+                                let recent = Array(chunkTokens.suffix(contextSize)).map { Int32($0) }
+                                let recentArr = MLXArray(recent)
+                                let logitsForRecent = lastLogits[0..., recentArr]
+                                let penalty = MLXArray(repetitionPenalty)
+                                let penalized = MLX.where(
+                                    logitsForRecent .> 0,
+                                    logitsForRecent / penalty,
+                                    logitsForRecent * penalty
+                                )
+                                lastLogits[0..., recentArr] = penalized
+                            }
                             let nextToken = lastLogits.argMax(axis: -1).item(Int.self)
 
                             if eosTokenIds.contains(nextToken) {
@@ -1501,6 +1522,16 @@ public class Qwen3ASRModel: Module {
 
                             chunkTokens.append(nextToken)
                             allGeneratedTokens.append(nextToken)
+
+                            // Backstop for greedy callers (penalty == 1.0): same contract
+                            // as generateSingleChunk. Disabled when penalty is set so legit
+                            // repetitive speech is not truncated.
+                            if repetitionPenalty == 1.0 && chunkTokens.count >= 24 {
+                                let tail = chunkTokens.suffix(24)
+                                if Set(tail).count <= 3 {
+                                    break
+                                }
+                            }
 
                             let tokenText = tokenizer.decode(tokens: [nextToken])
                             if resolvedLanguage == nil {
