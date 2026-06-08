@@ -34,6 +34,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
     enum EncoderExecutionImplementation: Sendable {
         case plain
         case compiled
+        case coreML
     }
 
     struct TDTTraceStep: Sendable, Equatable {
@@ -52,6 +53,9 @@ public final class ParakeetModel: Module, STTGenerationModel {
 
     var tdtDecoderImplementation: TDTDecoderImplementation?
     var encoderExecutionImplementation: EncoderExecutionImplementation?
+    #if canImport(CoreML)
+    var coreMLEncoder: ParakeetCoreMLEncoder?
+    #endif
     var tdtTraceEmitter: (@Sendable (TDTTraceStep) -> Void)?
     private var compiledEncoderFeaturesByShape: [String: @Sendable (MLXArray) -> MLXArray] = [:]
 
@@ -313,8 +317,29 @@ public final class ParakeetModel: Module, STTGenerationModel {
             let encodedFeatures = compiledEncoderFeatures(for: features)(features)
             let encodedLengths = computeEncodedLengths(from: resolvedLengths)
             return (encodedFeatures, encodedLengths)
+        case .coreML:
+            #if canImport(CoreML)
+            if let coreMLEncoder,
+               let result = try? coreMLEncoder.encode(features, outputDType: computeDType) {
+                return result
+            }
+            #endif
+            return encoder(features, lengths: resolvedLengths)  // fallback if CoreML unavailable
         }
     }
+
+    #if canImport(CoreML)
+    /// Route the Conformer encoder through CoreML/ANE; decoder and chunking stay in MLX.
+    public func enableCoreMLEncoder(modelURL: URL, fixedFrames: Int = 1000) throws {
+        coreMLEncoder = try ParakeetCoreMLEncoder(
+            modelURL: modelURL,
+            featIn: encoderConfig.featIn,
+            fixedFrames: fixedFrames,
+            subsamplingFactor: encoderConfig.subsamplingFactor
+        )
+        encoderExecutionImplementation = .coreML
+    }
+    #endif
 
     func compiledEncoderFeatures(for features: MLXArray) -> @Sendable (MLXArray) -> MLXArray {
         let key = "\(features.shape)-\(features.dtype)"
