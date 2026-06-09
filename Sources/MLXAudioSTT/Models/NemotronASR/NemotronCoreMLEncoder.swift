@@ -36,5 +36,31 @@ public extension NemotronASRModel {
         let url = try await ParakeetModel.downloadANEEncoderPackage(repo: repo, cache: cache)
         try enableCoreMLEncoder(modelURL: url)
     }
+
+    /// Enable the cache-aware **streaming** CoreML/ANE encoder from a local `.mlpackage`.
+    ///
+    /// `generateStream` then runs the conformer encoder on the ANE via the validated uniform-F
+    /// feeding (`[preFrames prev-mel ++ newFrames new-mel]`, stride `newFrames`) with manual cache
+    /// threading; the prompt MLP and RNN-T decode stay in MLX. `preFrames`/`newFrames` come from the
+    /// model's NeMo `streaming_cfg` (`pre_encode_cache_size[1]` / `chunk_size[1]`) and must match the
+    /// converted model. The attention cache is the encoder's left context and the conv cache is
+    /// `convKernelSize - 1`, both derived from the loaded config.
+    func enableCoreMLStreamingEncoder(
+        modelURL: URL,
+        preFrames: Int = 9,
+        newFrames: Int = 112
+    ) throws {
+        streamingCoreMLEncoder = try NemotronCoreMLStreamingEncoder(
+            modelURL: modelURL,
+            featIn: encoderConfig.featIn,
+            dModel: encoderConfig.dModel,
+            subsamplingFactor: encoderConfig.subsamplingFactor,
+            preFrames: preFrames,
+            newFrames: newFrames,
+            layers: encoderConfig.nLayers,
+            attnCache: defaultAttContextSize.first ?? 70,
+            convCache: encoderConfig.convKernelSize - 1
+        )
+    }
 }
 #endif

@@ -271,6 +271,11 @@ let package = Package(
                 "README.md",
             ]
         ),
+        .executableTarget(
+            name: "nemotron-stream-probe",
+            dependencies: ["MLXAudioSTT"],
+            path: "Sources/Tools/nemotron-stream-probe"
+        ),
 
         // MARK: - Tests
         .testTarget(
