@@ -150,7 +150,11 @@ extension NemotronASRModel {
             let window = MLX.concatenated(parts, axis: 1)  // [1, fixedFrames, featIn]
 
             let encoded = try coreEncoder.step(window)  // [1, dModel, T'] (drop already applied)
-            let keep = min(encoded.shape[2], max(1, (realNew + sf - 1) / sf))
+            // Non-final chunks emit exactly the frames for their real mel; the final chunk keeps
+            // all emitted frames (like the MLX path) so the last token (e.g. trailing punctuation)
+            // isn't cropped.
+            let isFinal = (p + new) >= total
+            let keep = isFinal ? encoded.shape[2] : min(encoded.shape[2], max(1, (realNew + sf - 1) / sf))
             let h = encoded[0..., 0..., 0..<keep].transposed(0, 2, 1).asType(computeDType)  // [1, keep, d]
             onChunk(applyPrompt(h, language: language))
             p += new

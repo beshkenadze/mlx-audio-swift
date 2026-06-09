@@ -45,9 +45,18 @@ Env: alex-mac (M-series, ANE), uv venv NeMo 2.x + coremltools + torch 2.10. Clip
   → leftover non-zero cache → maxDiff 0.28. Fix: `reset()` allocates **fresh contiguous** zero arrays.
   (Feeding a strided array *back as input* is fine — CoreML honors its strides; only manual zero didn't.)
 
+## 3.5 MATCHED-WEIGHT e2e — PASS (M1 Max, Swift CLI, 2026-06-09)
+- Converted the **3.5 multilingual** streaming encoder on NeMo **2.8** prerelease (`uv pip install
+  --prerelease=allow "nemo-toolkit[asr]>=2.8.0rc0"` — has `EncDecRNNTBPEModelWithPrompt`; stable 2.7.3
+  doesn't). att_context **[56,13]** (3.5 left=56, EN was 70) → F=121, attnCache 56. `_remote_35*.sh`.
+- `mlx-audio-swift-stt --model mlx-community/nemotron-3.5-asr-streaming-0.6b --stream` (MLX) vs same
+  `+ --coreml-stream-encoder nemotron_35_stream_func.mlpackage` (ANE) on conversational_a.wav (13s):
+  **transcripts word-for-word identical**, only diff = trailing "." — the final-chunk zero-pad subtly
+  perturbs the last real frame's conv (fixed-shape can't feed a variable final size). Cosmetic.
+- Swift derives all stream params from the loaded config (`attnCache = defaultAttContextSize.first` = 56),
+  so the same code matches both EN (70) and 3.5 (56). `--coreml-stream-encoder` CLI flag added.
+
 ## Remaining
-- **Matched-weight e2e:** Swift loads 3.5 multilingual MLX; the validated artifact is EN. True transcript
-  e2e needs the **3.5 streaming** `.mlpackage` (NeMo main — `EncDecRNNTBPEModelWithPrompt`; alex-mac has
-  only 2.7.3). Then: `--ane` streaming CLI wiring, HF upload, PR (mirror offline #13).
 - ANE runtime residency % of the stream model (convert was CPU_AND_NE; offline sibling 99% ANE).
-- Final-token edge on last partial chunk (cosmetic; torch & CoreML behave identically).
+- HF upload of the 3.5 stream `.mlpackage` + a `--ane`-streaming auto-download; PR (mirror offline #13).
+- Trailing-punctuation edge on the final chunk (cosmetic; inherent to fixed-shape zero-pad).

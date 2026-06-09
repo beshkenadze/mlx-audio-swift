@@ -79,6 +79,7 @@ private struct Options {
     var genKwargsRaw: String? = nil
     var text = ""
     var coremlEncoder: String? = nil
+    var coremlStreamEncoder: String? = nil
     var ane = false
 
     var temperature: Float? = nil
@@ -144,6 +145,9 @@ private struct Options {
             case "--coreml-encoder":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 options.coremlEncoder = v
+            case "--coreml-stream-encoder":
+                guard let v = it.next() else { throw CLIError.missingValue(arg) }
+                options.coremlStreamEncoder = v
             case "--ane":
                 options.ane = true
             case "--help", "-h":
@@ -297,6 +301,11 @@ enum App {
                 } else if options.ane {
                     try await nemotron.enableCoreMLEncoder(repo: NemotronASRModel.defaultANEEncoderRepo)
                     if options.verbose { print("ANE encoder enabled (Nemotron): \(NemotronASRModel.defaultANEEncoderRepo)") }
+                }
+                // Cache-aware streaming CoreML/ANE encoder (used by --stream / generateStream).
+                if let streamPath = options.coremlStreamEncoder {
+                    try nemotron.enableCoreMLStreamingEncoder(modelURL: resolveURL(path: streamPath))
+                    if options.verbose { print("CoreML/ANE streaming encoder enabled (Nemotron): \(streamPath)") }
                 }
             }
         }
