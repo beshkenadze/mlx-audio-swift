@@ -1,6 +1,7 @@
 #if canImport(CoreML)
 import CoreML
 import Foundation
+import HuggingFace
 
 /// Nemotron's FastConformer encoder has the same fixed-shape I/O as Parakeet's Conformer
 /// (`[1, T, featIn]` mel in, `[1, T', dModel]` + lengths out, 8× dw-striding subsampling), so
@@ -23,6 +24,17 @@ public extension NemotronASRModel {
             fixedFrames: fixedFrames,
             subsamplingFactor: encoderConfig.subsamplingFactor
         )
+    }
+
+    /// Hugging Face repo with the prebuilt CoreML/ANE encoder `.mlpackage` (matched to the MLX
+    /// weights of `nemotron-3.5-asr-streaming-0.6b`).
+    static var defaultANEEncoderRepo: String { "beshkenadze/nemotron-3.5-asr-streaming-0.6b-coreml-ane" }
+
+    /// Download the CoreML encoder `.mlpackage` from a Hugging Face repo, then route the offline
+    /// `decode()` path through it. Reuses Parakeet's downloader (the encoder package is generic).
+    func enableCoreMLEncoder(repo: String, cache: HubCache = .default) async throws {
+        let url = try await ParakeetModel.downloadANEEncoderPackage(repo: repo, cache: cache)
+        try enableCoreMLEncoder(modelURL: url)
     }
 }
 #endif
