@@ -37,8 +37,8 @@ struct NemotronCoreMLEncoderTests {
         }
     }
 
-    // The on-ANE run + cache-threading + reset checks need MLX/Metal, which `swift test` can't load
-    // (no metallib in the test bundle). They live in the `nemotron-stream-probe` executable instead:
-    //   swift run nemotron-stream-probe tools/coreml-ane/out/nemotron_stream_func.mlpackage
+    // On-ANE run + cache-threading + reset are validated end-to-end via the CLI
+    // (`mlx-audio-swift-stt --stream --coreml-stream-encoder <pkg>`); `swift test` can't load MLX's
+    // metallib, so only the CI-safe structural checks live here.
 }
 #endif
