@@ -198,14 +198,26 @@ public final class VoxtralRealtimeStreamSession {
     }
 
     private func decode(adapter: MLXArray, upTo emitLimit: Int) -> Delta {
-        guard prefilled else { return Delta(text: "", tokenIds: []) }
+        guard prefilled, let startLogits = lastLogits else { return Delta(text: "", tokenIds: []) }
 
         var newIds: [Int] = []
         // Mirrors the offline `generate` loop exactly (append → check → pop trailing
-        // EOS) so the streamed token stream is identical at temperature 0.
+        // EOS) so the streamed token stream is identical at temperature 0. Same
+        // pipelined pattern as offline: queue the next step before reading the token.
+        var pendingToken = model.sampleLazy(logits: startLogits, temperature: temperature)
+        if decPos < emitLimit { MLX.asyncEval(pendingToken) }
+
         while decPos < emitLimit {
-            guard let logits = lastLogits else { break }
-            let token = model.sample(logits: logits, temperature: temperature)
+            let tokenEmbed = model.decoder.embedTokens(pendingToken.reshaped([1]))
+            let inputEmbed = decPos < adapter.shape[0]
+                ? adapter[decPos..<(decPos + 1), 0...] + tokenEmbed
+                : tokenEmbed
+            let next = model.decoder(inputEmbed, startPos: decPos, cache: decCache)
+            let nextLogits = model.decoder.logits(next.0[0])
+            let nextToken = model.sampleLazy(logits: nextLogits, temperature: temperature)
+            MLX.asyncEval(nextToken)
+
+            let token = pendingToken.item(Int.self)
             generated.append(token)
 
             if token == model.config.eosTokenId || generated.count > maxTokens {
@@ -215,19 +227,10 @@ public final class VoxtralRealtimeStreamSession {
             }
             newIds.append(token)
 
-            let tokenEmbed = model.decoder.embedToken(tokenId: token)
-            let inputEmbed = decPos < adapter.shape[0]
-                ? adapter[decPos] + tokenEmbed
-                : tokenEmbed
-            let next = model.decoder(
-                inputEmbed.expandedDimensions(axis: 0),
-                startPos: decPos,
-                cache: decCache
-            )
             decCache = next.1
-            lastLogits = model.decoder.logits(next.0[0])
+            lastLogits = nextLogits
+            pendingToken = nextToken
             decPos += 1
-            MLX.eval(lastLogits!)
         }
 
         let textSoFar = model.decodeStreaming(generated)
