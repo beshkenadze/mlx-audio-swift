@@ -463,6 +463,17 @@ public extension VoxtralRealtimeModel {
         }
 
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: .all)
+
+        // The checkpoint ships the tied embedding/lm-head table unquantized
+        // (131k x 3072 bf16 = 805 MB read per decoded token). For quantized
+        // models, quantize it from the loaded weights: ~4x less lm-head
+        // bandwidth per decode step.
+        if quantConfig.perLayerQuantization != nil {
+            quantize(model: model) { path, module in
+                (path == "decoder.tok_embeddings" && module is Embedding) ? (64, 8) : nil
+            }
+        }
+
         model.ensureAdaScales(transcriptionDelayMs: config.transcriptionDelayMs)
         eval(model)
 

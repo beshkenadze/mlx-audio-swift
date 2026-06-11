@@ -282,10 +282,6 @@ final class VoxtralRealtimeDecoder: Module {
         adaScales = scales
     }
 
-    func embedToken(tokenId: Int) -> MLXArray {
-        tokEmbeddings.weight[tokenId]
-    }
-
     func embedTokens(_ tokenIds: MLXArray) -> MLXArray {
         tokEmbeddings(tokenIds)
     }
@@ -320,6 +316,8 @@ final class VoxtralRealtimeDecoder: Module {
     }
 
     func logits(_ h: MLXArray) -> MLXArray {
-        MLX.matmul(h, tokEmbeddings.weight.transposed(1, 0))
+        // `asLinear` is the tied lm-head: plain matmul for fp embeddings,
+        // quantizedMatmul when the embedding table is quantized at load.
+        tokEmbeddings.asLinear(h)
     }
 }
