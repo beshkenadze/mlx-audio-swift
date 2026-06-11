@@ -185,12 +185,19 @@ public final class KokoroModel: Module, SpeechGenerationModel, @unchecked Sendab
                 return
             }
             do {
-                let audio = try await self.generate(
-                    text: text, voice: voice, refAudio: refAudio,
-                    refText: refText, language: language,
-                    generationParameters: generationParameters
-                )
-                continuation.yield(.audio(audio))
+                // Sentence-level chunks: first audio after one sentence, not the
+                // whole input. maxLength keeps every chunk under maxTokenCount
+                // phoneme tokens (~510), so long inputs no longer throw.
+                let pieces = SentenceChunker.chunks(from: text, maxLength: 400)
+                for piece in pieces {
+                    try Task.checkCancellation()
+                    let audio = try await self.generate(
+                        text: piece, voice: voice, refAudio: refAudio,
+                        refText: refText, language: language,
+                        generationParameters: generationParameters
+                    )
+                    continuation.yield(.audio(audio))
+                }
                 continuation.finish()
             } catch {
                 continuation.finish(throwing: error)
