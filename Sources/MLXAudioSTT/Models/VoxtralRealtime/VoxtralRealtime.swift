@@ -67,31 +67,37 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
         var generated: [Int] = []
         let decodeStart = Date()
 
+        var pendingToken = sampleLazy(logits: context.logits, temperature: generationParameters.temperature)
+        asyncEval(pendingToken)
+
         for pos in context.promptLength..<context.nAudioTotal {
-            let token = sample(logits: context.logits, temperature: generationParameters.temperature)
+            // Queue the next step's GPU work from the still-unread token, then read
+            // the token while the GPU runs — speculative only w.r.t. EOS (one wasted
+            // forward at end-of-stream).
+            let tokenEmbed = decoder.embedTokens(pendingToken.reshaped([1]))
+            let inputEmbed: MLXArray
+            if pos < context.adapterOut.shape[0] {
+                inputEmbed = context.adapterOut[pos..<(pos + 1), 0...] + tokenEmbed
+            } else {
+                inputEmbed = tokenEmbed
+            }
+
+            let next = decoder(inputEmbed, startPos: pos, cache: context.cache)
+            let nextLogits = decoder.logits(next.0[0])
+            let nextToken = sampleLazy(logits: nextLogits, temperature: generationParameters.temperature)
+            asyncEval(nextToken)
+
+            let token = pendingToken.item(Int.self)
             generated.append(token)
 
             if token == config.eosTokenId || generated.count > generationParameters.maxTokens {
                 break
             }
 
-            let tokenEmbed = decoder.embedToken(tokenId: token)
-            let inputEmbed: MLXArray
-            if pos < context.adapterOut.shape[0] {
-                inputEmbed = context.adapterOut[pos] + tokenEmbed
-            } else {
-                inputEmbed = tokenEmbed
-            }
-
-            let next = decoder(
-                inputEmbed.expandedDimensions(axis: 0),
-                startPos: pos,
-                cache: context.cache
-            )
             context.cache = next.1
-            context.logits = decoder.logits(next.0[0])
+            context.logits = nextLogits
+            pendingToken = nextToken
 
-            eval(context.logits)
             if generated.count % 256 == 0 {
                 Memory.clearCache()
             }
@@ -138,8 +144,24 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
             var previousText = ""
             let decodeStart = Date()
 
+            var pendingToken = sampleLazy(logits: context.logits, temperature: generationParameters.temperature)
+            asyncEval(pendingToken)
+
             for pos in context.promptLength..<context.nAudioTotal {
-                let token = sample(logits: context.logits, temperature: generationParameters.temperature)
+                let tokenEmbed = decoder.embedTokens(pendingToken.reshaped([1]))
+                let inputEmbed: MLXArray
+                if pos < context.adapterOut.shape[0] {
+                    inputEmbed = context.adapterOut[pos..<(pos + 1), 0...] + tokenEmbed
+                } else {
+                    inputEmbed = tokenEmbed
+                }
+
+                let next = decoder(inputEmbed, startPos: pos, cache: context.cache)
+                let nextLogits = decoder.logits(next.0[0])
+                let nextToken = sampleLazy(logits: nextLogits, temperature: generationParameters.temperature)
+                asyncEval(nextToken)
+
+                let token = pendingToken.item(Int.self)
                 generated.append(token)
 
                 let filtered = generated.filter { $0 != config.eosTokenId }
@@ -161,23 +183,10 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
                     break
                 }
 
-                let tokenEmbed = decoder.embedToken(tokenId: token)
-                let inputEmbed: MLXArray
-                if pos < context.adapterOut.shape[0] {
-                    inputEmbed = context.adapterOut[pos] + tokenEmbed
-                } else {
-                    inputEmbed = tokenEmbed
-                }
-
-                let next = decoder(
-                    inputEmbed.expandedDimensions(axis: 0),
-                    startPos: pos,
-                    cache: context.cache
-                )
                 context.cache = next.1
-                context.logits = decoder.logits(next.0[0])
+                context.logits = nextLogits
+                pendingToken = nextToken
 
-                eval(context.logits)
                 if generated.count % 256 == 0 {
                     Memory.clearCache()
                 }
@@ -391,20 +400,21 @@ extension VoxtralRealtimeModel {
     }
 
     func sample(logits: MLXArray, temperature: Float) -> Int {
-        let logits1D: MLXArray
-        if logits.ndim > 1 {
-            logits1D = logits.squeezed()
-        } else {
-            logits1D = logits
-        }
+        sampleLazy(logits: logits, temperature: temperature).item(Int.self)
+    }
+
+    /// Sample without forcing a GPU→CPU sync: returns the (lazy) scalar token-id
+    /// array so callers can `asyncEval` it and overlap the next decode step's GPU
+    /// work with reading this token on the CPU (mlx-lm's pipelined decode pattern).
+    func sampleLazy(logits: MLXArray, temperature: Float) -> MLXArray {
+        let logits1D = logits.ndim > 1 ? logits.squeezed() : logits
 
         if temperature == 0 {
-            return logits1D.argMax(axis: -1).item(Int.self)
+            return logits1D.argMax(axis: -1)
         }
 
         let scaled = (logits1D / temperature).expandedDimensions(axis: 0)
-        let sampled = categorical(scaled)
-        return sampled.item(Int.self)
+        return categorical(scaled).squeezed()
     }
 }
 
@@ -453,6 +463,17 @@ public extension VoxtralRealtimeModel {
         }
 
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: .all)
+
+        // The checkpoint ships the tied embedding/lm-head table unquantized
+        // (131k x 3072 bf16 = 805 MB read per decoded token). For quantized
+        // models, quantize it from the loaded weights: ~4x less lm-head
+        // bandwidth per decode step.
+        if quantConfig.perLayerQuantization != nil {
+            quantize(model: model) { path, module in
+                (path == "decoder.tok_embeddings" && module is Embedding) ? (64, 8) : nil
+            }
+        }
+
         model.ensureAdaScales(transcriptionDelayMs: config.transcriptionDelayMs)
         eval(model)
 
