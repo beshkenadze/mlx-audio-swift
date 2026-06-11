@@ -71,7 +71,13 @@ final class VoxtralRealtimeDecoderAttention: Module {
 
     }
 
-    private func ropeFrequencies(positions: MLXArray) -> (MLXArray, MLXArray) {
+    // RoPE cos/sin are identical for every layer; computed once per decoder
+    // forward (see `VoxtralRealtimeDecoder.callAsFunction`) and passed down.
+    static func ropeFrequencies(
+        positions: MLXArray,
+        headDim: Int,
+        ropeTheta: Float
+    ) -> (MLXArray, MLXArray) {
         let idx = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
         let ropeInvFreq = 1.0 / MLX.pow(MLXArray(ropeTheta), idx / Float(headDim))
         let angles = positions.asType(.float32).expandedDimensions(axis: 1) * ropeInvFreq.expandedDimensions(axis: 0)
@@ -81,6 +87,7 @@ final class VoxtralRealtimeDecoderAttention: Module {
     func callAsFunction(
         _ x: MLXArray,
         positions: MLXArray,
+        rope: (cos: MLXArray, sin: MLXArray),
         cache: VoxtralRealtimeDecoderKVCache?
     ) -> (MLXArray, VoxtralRealtimeDecoderKVCache) {
         let seqLen = x.shape[0]
@@ -89,7 +96,7 @@ final class VoxtralRealtimeDecoderAttention: Module {
         var k = wk(x)
         var v = wv(x)
 
-        let (cos, sin) = ropeFrequencies(positions: positions)
+        let (cos, sin) = rope
         q = voxtralApplyInterleavedRoPE(q, cos: cos, sin: sin, nHeads: nHeads, headDim: headDim)
         k = voxtralApplyInterleavedRoPE(k, cos: cos, sin: sin, nHeads: nKvHeads, headDim: headDim)
 
@@ -179,13 +186,14 @@ final class VoxtralRealtimeDecoderLayer: Module {
     func callAsFunction(
         _ x: MLXArray,
         positions: MLXArray,
+        rope: (cos: MLXArray, sin: MLXArray),
         adaScale: MLXArray?,
         cache: VoxtralRealtimeDecoderKVCache?
     ) -> (MLXArray, VoxtralRealtimeDecoderKVCache) {
         var out = x
 
         var h = attentionNorm(out)
-        let attn = attention(h, positions: positions, cache: cache)
+        let attn = attention(h, positions: positions, rope: rope, cache: cache)
         h = attn.0
         out = out + h
 
@@ -254,6 +262,11 @@ final class VoxtralRealtimeDecoder: Module {
         var h = embeds
         let seqLen = h.shape[0]
         let positions = MLXArray(startPos..<(startPos + seqLen)).asType(.int32)
+        let rope = VoxtralRealtimeDecoderAttention.ropeFrequencies(
+            positions: positions,
+            headDim: config.headDim,
+            ropeTheta: config.ropeTheta
+        )
 
         var newCache: [VoxtralRealtimeDecoderKVCache?] = []
         newCache.reserveCapacity(layers.count)
@@ -261,7 +274,7 @@ final class VoxtralRealtimeDecoder: Module {
         for i in layers.indices {
             let layerCache = cache?[i]
             let adaScale = adaScales?[i]
-            let next = layers[i](h, positions: positions, adaScale: adaScale, cache: layerCache)
+            let next = layers[i](h, positions: positions, rope: rope, adaScale: adaScale, cache: layerCache)
             h = next.0
             newCache.append(next.1)
         }

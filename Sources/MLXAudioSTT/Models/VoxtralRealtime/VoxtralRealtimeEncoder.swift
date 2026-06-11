@@ -112,6 +112,7 @@ final class VoxtralRealtimeEncoderAttention: Module {
     func callAsFunction(
         _ x: MLXArray,
         positions: MLXArray,
+        rope: (cos: MLXArray, sin: MLXArray),
         cache: VoxtralRealtimeEncoderKVCache?
     ) -> (MLXArray, VoxtralRealtimeEncoderKVCache) {
         let seqLen = x.shape[0]
@@ -120,11 +121,7 @@ final class VoxtralRealtimeEncoderAttention: Module {
         var k = wk(x)
         var v = wv(x)
 
-        let (cos, sin) = voxtralComputeRopeFrequencies(
-            positions: positions,
-            headDim: headDim,
-            theta: ropeTheta
-        )
+        let (cos, sin) = rope
 
         q = voxtralApplyInterleavedRoPE(q, cos: cos, sin: sin, nHeads: nHeads, headDim: headDim)
         k = voxtralApplyInterleavedRoPE(k, cos: cos, sin: sin, nHeads: nHeads, headDim: headDim)
@@ -204,12 +201,13 @@ final class VoxtralRealtimeEncoderLayer: Module {
     func callAsFunction(
         _ x: MLXArray,
         positions: MLXArray,
+        rope: (cos: MLXArray, sin: MLXArray),
         cache: VoxtralRealtimeEncoderKVCache?
     ) -> (MLXArray, VoxtralRealtimeEncoderKVCache) {
         var out = x
 
         var h = attentionNorm(out)
-        let attnOut = attention(h, positions: positions, cache: cache)
+        let attnOut = attention(h, positions: positions, rope: rope, cache: cache)
         h = attnOut.0
         out = out + h
 
@@ -276,13 +274,22 @@ final class VoxtralRealtimeAudioEncoder: Module {
         return x
     }
 
+    private func ropeFor(_ positions: MLXArray) -> (cos: MLXArray, sin: MLXArray) {
+        voxtralComputeRopeFrequencies(
+            positions: positions,
+            headDim: config.headDim,
+            theta: config.ropeTheta
+        )
+    }
+
     func encodeFull(_ convOut: MLXArray) -> MLXArray {
         let seqLen = convOut.shape[0]
         let positions = MLXArray(0..<seqLen).asType(.int32)
+        let rope = ropeFor(positions)
 
         var x = convOut
         for layer in transformerLayers {
-            x = layer(x, positions: positions, cache: nil).0
+            x = layer(x, positions: positions, rope: rope, cache: nil).0
         }
 
         x = transformerNorm(x)
@@ -305,9 +312,10 @@ final class VoxtralRealtimeAudioEncoder: Module {
             let chunkEnd = min(chunkStart + sw, seqLen)
             var x = convOut[chunkStart..<chunkEnd, 0...]
             let positions = MLXArray(chunkStart..<chunkEnd).asType(.int32)
+            let rope = ropeFor(positions)
 
             for i in transformerLayers.indices {
-                let next = transformerLayers[i](x, positions: positions, cache: caches[i])
+                let next = transformerLayers[i](x, positions: positions, rope: rope, cache: caches[i])
                 x = next.0
                 caches[i] = next.1
             }
@@ -332,8 +340,9 @@ final class VoxtralRealtimeAudioEncoder: Module {
     ) -> MLXArray {
         var x = convBlock
         let positions = MLXArray(startPos..<(startPos + convBlock.shape[0])).asType(.int32)
+        let rope = ropeFor(positions)
         for i in transformerLayers.indices {
-            let next = transformerLayers[i](x, positions: positions, cache: caches[i])
+            let next = transformerLayers[i](x, positions: positions, rope: rope, cache: caches[i])
             x = next.0
             caches[i] = next.1
         }
