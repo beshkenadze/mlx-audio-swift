@@ -2,10 +2,53 @@ import Foundation
 import MLX
 import MLXNN
 
-struct VoxtralRealtimeDecoderKVCache {
-    var keys: MLXArray   // [kv_len, n_kv_heads * head_dim]
-    var values: MLXArray // [kv_len, n_kv_heads * head_dim]
-    var positionOffset: Int
+/// Step-preallocated KV cache: appends write into a preallocated buffer via
+/// slice-assignment (O(new tokens)) instead of re-concatenating the whole
+/// history every step (O(kv_len) copies per token, O(n²) per stream).
+final class VoxtralRealtimeDecoderKVCache {
+    private static let step = 256
+
+    private var keyBuf: MLXArray?
+    private var valueBuf: MLXArray?
+    private(set) var length = 0
+    private(set) var positionOffset: Int
+
+    /// Active (filled) prefix views, e.g. for materialising with `eval`.
+    var keys: MLXArray { keyBuf![0..<length, 0...] }
+    var values: MLXArray { valueBuf![0..<length, 0...] }
+
+    init(positionOffset: Int = 0) {
+        self.positionOffset = positionOffset
+    }
+
+    /// Append `k`/`v` rows and return the full active K/V views.
+    func append(keys k: MLXArray, values v: MLXArray) -> (MLXArray, MLXArray) {
+        let needed = length + k.shape[0]
+        if keyBuf == nil || needed > keyBuf!.shape[0] {
+            let cap = ((needed + Self.step - 1) / Self.step) * Self.step
+            let kNew = MLX.zeros([cap, k.shape[1]], dtype: k.dtype)
+            let vNew = MLX.zeros([cap, v.shape[1]], dtype: v.dtype)
+            if let keyBuf, let valueBuf, length > 0 {
+                kNew[0..<length, 0...] = keyBuf[0..<length, 0...]
+                vNew[0..<length, 0...] = valueBuf[0..<length, 0...]
+            }
+            keyBuf = kNew
+            valueBuf = vNew
+        }
+        keyBuf![length..<needed, 0...] = k
+        valueBuf![length..<needed, 0...] = v
+        length = needed
+        return (keyBuf![0..<needed, 0...], valueBuf![0..<needed, 0...])
+    }
+
+    /// Sliding-window fallback (decoder window is 8192 tokens ≈ 10.9 min of
+    /// audio, so this is cold): replace the buffer with the trimmed tail.
+    func replaceTrimmed(keys k: MLXArray, values v: MLXArray, positionOffset: Int) {
+        keyBuf = k
+        valueBuf = v
+        length = k.shape[0]
+        self.positionOffset = positionOffset
+    }
 }
 
 func voxtralComputeTimeEmbedding(
@@ -100,12 +143,10 @@ final class VoxtralRealtimeDecoderAttention: Module {
         q = voxtralApplyInterleavedRoPE(q, cos: cos, sin: sin, nHeads: nHeads, headDim: headDim)
         k = voxtralApplyInterleavedRoPE(k, cos: cos, sin: sin, nHeads: nKvHeads, headDim: headDim)
 
-        var positionOffset = cache?.positionOffset ?? 0
-        if let cache {
-            k = MLX.concatenated([cache.keys, k], axis: 0)
-            v = MLX.concatenated([cache.values, v], axis: 0)
-        }
+        let newCache = cache ?? VoxtralRealtimeDecoderKVCache()
+        (k, v) = newCache.append(keys: k, values: v)
 
+        var positionOffset = newCache.positionOffset
         var kvLen = k.shape[0]
         if kvLen > slidingWindow {
             let trim = kvLen - slidingWindow
@@ -113,13 +154,8 @@ final class VoxtralRealtimeDecoderAttention: Module {
             v = v[trim...]
             kvLen = slidingWindow
             positionOffset += trim
+            newCache.replaceTrimmed(keys: k, values: v, positionOffset: positionOffset)
         }
-
-        let newCache = VoxtralRealtimeDecoderKVCache(
-            keys: k,
-            values: v,
-            positionOffset: positionOffset
-        )
 
         let q4 = q.reshaped(1, seqLen, nHeads, headDim).transposed(0, 2, 1, 3)
         let k4 = k.reshaped(1, kvLen, nKvHeads, headDim).transposed(0, 2, 1, 3)
